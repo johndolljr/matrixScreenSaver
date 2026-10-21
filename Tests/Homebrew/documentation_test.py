@@ -10,7 +10,9 @@ class DocumentationTest(unittest.TestCase):
         quick = text.split("## Quick install\n", 1)[1].split("\n## ", 1)[0]
         self.assertIn("brew trust --cask patrickschaper/tap/matrix-screen-saver", quick)
         self.assertIn("brew install --cask patrickschaper/tap/matrix-screen-saver", quick)
-        self.assertLessEqual(len(quick.strip().splitlines()), 5)
+        self.assertLessEqual(len(quick.strip().splitlines()), 7)
+        self.assertIn("open **MatrixWallpaper** in Applications", quick)
+        self.assertIn("MatrixScreenSaver → Options…", quick)
         self.assertNotIn("## Homebrew install", text)
         self.assertNotIn("## Homebrew lifecycle", text)
         self.assertNotIn("## Manual quick install", text)

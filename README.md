@@ -13,6 +13,9 @@ brew trust --cask patrickschaper/tap/matrix-screen-saver
 brew install --cask patrickschaper/tap/matrix-screen-saver
 ```
 
+- Wallpaper: open **MatrixWallpaper** in Applications.
+- Saver options: **System Settings → Wallpaper → Screen Saver → MatrixScreenSaver → Options…**.
+
 ## Buy me a coffee
 
 There is no spoon. There is coffee. Donations help fund a developer license for signing the screen saver.
