@@ -16,9 +16,11 @@ swiftc \
   "$SRC/MatrixRendererLimits.swift" \
   "$SRC/ScreenSyncCoordinator.swift" \
   "$SRC/NativeMatrixRenderer.swift" \
+  "$ROOT/Sources/MatrixWallpaper/WallpaperPlaybackState.swift" \
   "$TESTS/Xorshift64Tests.swift" \
   "$TESTS/ScreenSyncCoordinatorTests.swift" \
   "$TESTS/NativeMatrixRendererTests.swift" \
+  "$TESTS/WallpaperPlaybackStateTests.swift" \
   "$TESTS/main.swift" \
   -o "$TEST_BIN"
 

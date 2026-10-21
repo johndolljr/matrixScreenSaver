@@ -88,6 +88,18 @@ struct MatrixScreenSaverOptions: Equatable {
     var scanLinesIntensity = defaultScanLinesIntensity
     var scanLinesVertical = defaultScanLinesVertical
 
+    /// Identifies changes that rebuild the grid or alter the coordinated scene sequence.
+    ///
+    /// - Parameter previous: Configuration currently applied to the session.
+    /// - Returns: Whether all displays must restart together rather than update in place.
+    func requiresSceneRestart(comparedTo previous: MatrixScreenSaverOptions) -> Bool {
+        characterWidth != previous.characterWidth || characterHeight != previous.characterHeight ||
+        neoMessageSceneEnabled != previous.neoMessageSceneEnabled ||
+        neoMessageSpeedFactor != previous.neoMessageSpeedFactor || neoMessageLines != previous.neoMessageLines ||
+        numberSceneEnabled != previous.numberSceneEnabled ||
+        rainRunForever != previous.rainRunForever || rainDurationSeconds != previous.rainDurationSeconds
+    }
+
     /// Converts persisted options into the renderer configuration type.
     func rendererConfiguration(isPreview: Bool = false) -> NativeMatrixRenderer.Configuration {
         NativeMatrixRenderer.Configuration(
@@ -243,7 +255,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
          }
      }
 
-    private weak var owner: MatrixScreenSaverView?
+    /// Delivers validated options to either the saver view or the wallpaper host.
+    private let onApply: (MatrixScreenSaverOptions) -> Void
     var onClose: (() -> Void)?
 
     private let window: NSWindow
@@ -301,9 +314,11 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     private let charactersField = NSTextField(string: "")
     private var didClose = false
 
-    /// Creates the options sheet controller for a specific saver view instance.
-    init(owner: MatrixScreenSaverView) {
-        self.owner = owner
+    /// Creates native options UI with a host-owned apply action.
+    ///
+    /// - Parameter onApply: Receives validated options when the user chooses Apply.
+    init(onApply: @escaping (MatrixScreenSaverOptions) -> Void) {
+        self.onApply = onApply
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
             styleMask: [.titled, .closable],
@@ -349,12 +364,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     /// Validates and applies the edited options.
     @objc private func apply(_ sender: Any?) {
         do {
-            guard let owner else {
-                closeSheet(with: .cancel)
-                return
-            }
             let options = try validatedOptions()
-            owner.applySaverOptionsFromSheet(options)
+            onApply(options)
             closeSheet(with: .OK)
         } catch {
             presentValidationAlert(message: error.localizedDescription)

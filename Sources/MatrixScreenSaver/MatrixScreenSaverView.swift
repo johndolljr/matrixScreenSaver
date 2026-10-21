@@ -6,8 +6,9 @@ final class MatrixScreenSaverView: ScreenSaverView {
     private static let terminalTitle = "cxxmatrix"
     private static let screenSaverWillStopNotification = Notification.Name("com.apple.screensaver.willstop")
     private static let screenSaverDidStopNotification = Notification.Name("com.apple.screensaver.didstop")
-    private static let defaults: ScreenSaverDefaults = {
-        let moduleName = Bundle(for: MatrixScreenSaverView.self).bundleIdentifier ?? "MatrixScreenSaver"
+    /// Keeps saver preferences shared even when this view is compiled into a different host.
+    static let defaults: ScreenSaverDefaults = {
+        let moduleName = "dev.patsch.MatrixScreenSaver"
         guard let defaults = ScreenSaverDefaults(forModuleWithName: moduleName) else {
             fatalError("Unable to create ScreenSaverDefaults for \(moduleName)")
         }
@@ -34,6 +35,12 @@ final class MatrixScreenSaverView: ScreenSaverView {
     ])
 
     private var animationActive = false
+    /// Whether the wallpaper host has suspended the framework timer while preserving renderer state.
+    private var wallpaperAnimationPaused = false
+
+    /// Enables coordinated scenes while the wallpaper app owns system suspension handling.
+    /// Set before starting animation; ordinary saver and preview hosts keep the default.
+    var isWallpaperHost = false
     private var terminalSize: TerminalSize?
     private var hasLoggedFirstDraw = false
     private var geometrySyncInProgress = false
@@ -184,7 +191,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
             saverOptions = Self.loadSaverOptions()
         }
         shouldReloadOptionsOnStart = true
-        let skipSyncDelay = isPreview || !Self.isRunningInScreenSaverEngine
+        let skipSyncDelay = isPreview || (!isWallpaperHost && !Self.isRunningInScreenSaverEngine)
         nativeRenderer.updateConfiguration(saverOptions.rendererConfiguration(isPreview: skipSyncDelay))
         animationTimeInterval = nativeRenderer.preferredAnimationTimeInterval
         NSLog("MatrixScreenSaver startAnimation bounds=%@", NSStringFromRect(bounds))
@@ -210,6 +217,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
     override func stopAnimation() {
         let wasActive = animationActive
         animationActive = false
+        wallpaperAnimationPaused = false
         pendingSync = false
         pendingRestart = false
         pendingSceneAdvance = false
@@ -225,10 +233,12 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
     /// Advances the simulation and schedules redraws when the frame changed.
     override func animateOneFrame() {
-        guard animationActive else {
+        guard animationActive && !wallpaperAnimationPaused else {
             return
         }
         guard isHostWindowVisibleForAnimation else {
+            // The wallpaper app owns resumption when desktop visibility changes.
+            guard !isWallpaperHost else { return }
             let now = Date.timeIntervalSinceReferenceDate
             if firstHiddenFrameTime == 0 {
                 firstHiddenFrameTime = now
@@ -252,6 +262,9 @@ final class MatrixScreenSaverView: ScreenSaverView {
             guard let time = startTime else {
                 return
             }
+            nativeRenderer.overrideSceneContentStartTime = pendingRestart
+                ? ScreenSyncCoordinator.shared.restartContentTime
+                : ScreenSyncCoordinator.shared.startContentTime
             pendingSync = false
             if pendingRestart {
                 ScreenSyncCoordinator.shared.finishRestart(ObjectIdentifier(self))
@@ -429,7 +442,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
                 guard let self, self.animationActive else {
                     return
                 }
-                if !window.isVisible {
+                if !window.isVisible && !self.isWallpaperHost {
                     self.handleHostDetachment(reason: "window-hidden")
                 }
             },
@@ -465,6 +478,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
     /// Starts observing distributed screen saver lifecycle notifications.
     private func updateScreenSaverLifecycleObservation() {
         stopObservingScreenSaverLifecycle()
+        guard !isWallpaperHost else { return }
 
         let center = DistributedNotificationCenter.default()
         screenSaverLifecycleObservers = [
@@ -994,7 +1008,32 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
     /// Applies options coming back from the configure sheet.
     func applySaverOptionsFromSheet(_ options: MatrixScreenSaverOptions) {
-        applySaverOptions(options, persist: true, restartAnimation: animationActive)
+        let restart = options.sanitized().requiresSceneRestart(comparedTo: saverOptions)
+        applySaverOptions(options, persist: true, restartAnimation: animationActive && restart)
+    }
+
+    /// Applies host-persisted rendering options without resetting a coordinated wallpaper session.
+    ///
+    /// - Parameter options: Visual options that do not require a grid or scene rebuild.
+    func applyWallpaperOptions(_ options: MatrixScreenSaverOptions) {
+        applySaverOptions(options, persist: false, restartAnimation: false)
+    }
+
+    /// Stops framework frame scheduling without releasing cells or scene-barrier membership.
+    func pauseWallpaperAnimation() {
+        guard isWallpaperHost, animationActive, !wallpaperAnimationPaused else { return }
+        wallpaperAnimationPaused = true
+        super.stopAnimation()
+    }
+
+    /// Resumes the preserved wallpaper scene after excluding a shared suspension interval.
+    ///
+    /// - Parameter duration: Wall-clock pause duration, identical for every display.
+    func resumeWallpaperAnimation(after duration: TimeInterval) {
+        guard wallpaperAnimationPaused else { return }
+        nativeRenderer.shiftTimeline(by: duration)
+        wallpaperAnimationPaused = false
+        super.startAnimation()
     }
 
     /// Applies options to the live saver and optionally persists or restarts it.
@@ -1011,7 +1050,8 @@ final class MatrixScreenSaverView: ScreenSaverView {
             stopAnimation()
         }
 
-        nativeRenderer.updateConfiguration(sanitizedOptions.rendererConfiguration())
+        let skipSyncDelay = isPreview || (!isWallpaperHost && !Self.isRunningInScreenSaverEngine)
+        nativeRenderer.updateConfiguration(sanitizedOptions.rendererConfiguration(isPreview: skipSyncDelay))
         animationTimeInterval = nativeRenderer.preferredAnimationTimeInterval
 
         updateLayout()
@@ -1024,14 +1064,16 @@ final class MatrixScreenSaverView: ScreenSaverView {
     }
 
     /// Loads persisted options from ScreenSaverDefaults.
-    private static func loadSaverOptions() -> MatrixScreenSaverOptions {
+    static func loadSaverOptions() -> MatrixScreenSaverOptions {
         defaults.synchronize()
         return MatrixScreenSaverOptions.load(from: defaults)
     }
 
     /// Creates a fresh configure-sheet controller for each presentation.
     private func makeOptionsSheetController() -> MatrixScreenSaverOptionsSheetController {
-        let controller = MatrixScreenSaverOptionsSheetController(owner: self)
+        let controller = MatrixScreenSaverOptionsSheetController { [weak self] options in
+            self?.applySaverOptionsFromSheet(options)
+        }
         controller.onClose = { [weak self, weak controller] in
             guard let self, let controller, self.optionsSheetController === controller else {
                 return

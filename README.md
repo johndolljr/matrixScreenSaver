@@ -40,6 +40,52 @@ The saver exposes a native **Options…** sheet. The values are stored with `Scr
 
 ## Development
 
+### Desktop wallpaper app
+
+Build and launch the separate native menu bar app:
+
+```bash
+./build-wallpaper.sh
+open build/MatrixWallpaper.app
+```
+
+The **Matrix** menu provides **Start / Stop**, **Options…**, and **Quit**.
+It renders the real saver independently on each display, with distinct rain and
+coordinated scenes. Passive desktop-level windows leave input to Finder and do
+not change your macOS wallpaper settings. Stop or Quit reveals your existing wallpaper.
+
+Options use the same `dev.patsch.MatrixScreenSaver` preferences as the screen saver.
+Changes made in the app apply to all wallpaper displays and future saver sessions.
+Glow, twinkle, rain density, glyphs, frame rate, error rate, and scan lines update
+in place without replaying the intro. Character size, intro settings, and rain
+cycle mode/duration restart all displays together.
+Changes made elsewhere are reloaded on Start and when opening Options; running
+processes do not continuously synchronize preferences.
+
+Playback suspends for sleep, inactive sessions, lock, and screen saver activity.
+Stop remains stopped after wake or unlock. Temporary suspension preserves the
+current rain and intro state and excludes paused time from scene clocks.
+Actual display geometry/scaling changes rebuild the coordinated session;
+unchanged display notifications on wake do not restart it.
+Lock and saver detection supplements public workspace notifications with
+best-effort macOS distributed signals; delivery is not guaranteed.
+
+No automatic login startup, System Settings wallpaper registration, or private
+Wallpaper.framework integration is installed. The existing `.saver` build and
+installation remain separate. Desktop behavior across widgets, Spaces, Show Desktop,
+Stage Manager, and fullscreen apps should be checked on the macOS version you use.
+
+Run the additional AppKit checks from a logged-in graphical macOS session:
+
+```bash
+./wallpaper-tests.sh
+```
+
+These check native animation, passive windows, shared options UI, menu actions,
+notification-driven suspension, display reconciliation, and cleanup. They briefly
+create desktop windows and open Options; they do not alter your saved saver settings.
+Actual lock/sleep/saver transitions and physical display hotplug still need live checks.
+
 ### Current state
 
 - Native Swift/AppKit screen saver bundle

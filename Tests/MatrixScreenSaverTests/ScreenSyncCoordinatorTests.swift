@@ -2,6 +2,25 @@ import Foundation
 
 /// Tests for ScreenSyncCoordinator restart barrier resolution logic.
 func screenSyncCoordinatorTests() {
+    do {
+        let coordinator = ScreenSyncCoordinator.shared
+        coordinator._resetForTesting()
+        let participant = NSObject()
+        let id = ObjectIdentifier(participant)
+        coordinator.register(id, expectedCount: 1)
+        coordinator.requestRestart(id)
+        coordinator.requestPhaseAdvance(id)
+        let start = coordinator.resolvedStartTime()!
+        let restart = coordinator.resolvedRestartTime()!
+        let phase = coordinator.resolvedPhaseAdvanceTime()!
+        coordinator.shiftTimeline(by: 3600)
+        ok(coordinator.resolvedStartTime() == start + 3600 && coordinator.resolvedRestartTime() == restart + 3600 && coordinator.resolvedPhaseAdvanceTime() == phase + 3600,
+           "ScreenSyncCoordinator: suspension shifts all shared anchors without losing participants")
+        ok(coordinator.registeredCount == 1, "ScreenSyncCoordinator: suspension preserves barrier membership")
+        ok(coordinator.startContentTime == start && coordinator.restartContentTime == restart,
+           "ScreenSyncCoordinator: pause leaves session content timestamps immutable")
+        coordinator.unregister(id)
+    }
     // Test 1: All displays requesting → immediate resolution
     do {
         ScreenSyncCoordinator.shared._resetForTesting()

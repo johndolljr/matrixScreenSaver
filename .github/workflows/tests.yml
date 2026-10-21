@@ -23,3 +23,12 @@ jobs:
 
       - name: Run tests
         run: ./tests.sh
+
+      - name: Build screen saver
+        run: ./build.sh
+
+      - name: Build wallpaper app
+        run: ./build-wallpaper.sh
+
+      - name: Run wallpaper AppKit checks
+        run: ./wallpaper-tests.sh

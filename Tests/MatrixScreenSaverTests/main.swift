@@ -18,6 +18,7 @@ func ok(_ condition: Bool, _ description: String, file: StaticString = #file, li
 xorshift64Tests()
 screenSyncCoordinatorTests()
 nativeMatrixRendererTests()
+wallpaperPlaybackStateTests()
 
 print("1..\(testCount)")
 exit(failCount == 0 ? 0 : 1)

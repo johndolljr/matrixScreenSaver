@@ -253,6 +253,9 @@ final class NativeMatrixRenderer {
     /// moment.
     var overrideSceneStartTime: TimeInterval?
 
+    /// Stable scripted-content date supplied separately when a shared playback anchor was paused.
+    var overrideSceneContentStartTime: TimeInterval?
+
     private var configuration = Configuration()
     private var activeGlyphPool: [UnicodeScalar] = NativeMatrixRenderer.defaultGlyphPool
 
@@ -300,6 +303,8 @@ final class NativeMatrixRenderer {
     private var numberIntroCursorVisible = false
     private var numberIntroRainFrame = 0
     private var sceneStartTime: TimeInterval = 0   // 5-second-quantised anchor — shared across displays
+    /// Immutable session date keeps scripted text identical when displays cross a phase barrier around a pause.
+    private var sceneContentStartTime: TimeInterval = 0
     private var sceneSeed: UInt64 = 0             // seed derived from sceneStartTime
     private var numberSceneRNG: Xorshift64 = Xorshift64(seed: 1)
     private var rainRNG: Xorshift64 = Xorshift64(seed: 1)
@@ -374,6 +379,18 @@ final class NativeMatrixRenderer {
         running = false
     }
 
+    /// Excludes paused wall-clock time while retaining cells, random state, and scene progress.
+    ///
+    /// - Parameter duration: Shared suspension duration for all participating displays.
+    func shiftTimeline(by duration: TimeInterval) {
+        lastUpdateTime += duration
+        sceneStartTime += duration
+        numberIntroAnchor += duration
+        rainStartTime += duration
+        if let start = overrideSceneStartTime { overrideSceneStartTime = start + duration }
+        neoScene.shiftTimeline(by: duration)
+    }
+
     /// Returns whether a restart has been requested (by `stepRainFrame()` when
     /// rain drains), then clears the flag. The View uses this to coordinate
     /// the restart across all displays via the ``ScreenSyncCoordinator``.
@@ -437,8 +454,10 @@ final class NativeMatrixRenderer {
         let previousConfiguration = self.configuration
         let sanitizedConfiguration = configuration.sanitized()
         self.configuration = sanitizedConfiguration
-        lastUpdateTime = Date.timeIntervalSinceReferenceDate
-        pendingSimulationSteps = 0.0
+        if !running {
+            lastUpdateTime = Date.timeIntervalSinceReferenceDate
+            pendingSimulationSteps = 0.0
+        }
 
         activeGlyphPool = Self.resolveGlyphPool(characters: sanitizedConfiguration.characters)
 
@@ -455,6 +474,7 @@ final class NativeMatrixRenderer {
         } else if columns > 0, rows > 0, activeScene == .rainForever {
             constructRenderContent()
         }
+        markAllRowsDirty()
     }
 
     /// Advances the renderer by the elapsed time and reports whether output changed.
@@ -566,7 +586,7 @@ final class NativeMatrixRenderer {
 
         let cursorBlinkEnd = Double(Self.numberIntroCursorBlinkCount * 2) * Self.numberIntroCursorBlinkPeriod
 
-        let blinkEndDate = Date(timeIntervalSinceReferenceDate: numberIntroAnchor + cursorBlinkEnd)
+        let blinkEndDate = Date(timeIntervalSinceReferenceDate: sceneContentStartTime + neoWallDuration + cursorBlinkEnd)
         let formatter = DateFormatter()
         formatter.dateFormat = "MM-dd-yy"
         let dateString = formatter.string(from: blinkEndDate)
@@ -905,7 +925,8 @@ final class NativeMatrixRenderer {
             let syncWindow: TimeInterval = 10.0
             sceneStartTime = floor(nowTime / syncWindow) * syncWindow + syncWindow
         }
-        sceneSeed = UInt64(bitPattern: Int64(sceneStartTime))
+        sceneContentStartTime = overrideSceneContentStartTime ?? sceneStartTime
+        sceneSeed = UInt64(bitPattern: Int64(sceneContentStartTime))
         rainRNG = Xorshift64(seed: sceneSeed &+ 3 &+ seedOffset)
 
         guard columns > 0, rows > 0 else {

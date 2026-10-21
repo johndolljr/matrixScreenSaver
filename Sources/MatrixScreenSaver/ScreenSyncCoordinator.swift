@@ -29,6 +29,12 @@ final class ScreenSyncCoordinator {
     private var firstRegistrationTime: TimeInterval = 0
     private var resolvedTime: TimeInterval?
 
+    /// Immutable startup date used for scripted content and seeds even if playback clocks pause.
+    private(set) var startContentTime: TimeInterval?
+
+    /// Immutable content date for the currently resolved rain restart.
+    private(set) var restartContentTime: TimeInterval?
+
     /// Instances that have requested a rain restart.
     private var restartRequestedIDs: Set<ObjectIdentifier> = []
     /// Resolved time for the next coordinated restart, once all displays are ready.
@@ -70,6 +76,7 @@ final class ScreenSyncCoordinator {
             self.maxExpectedCount = max(expectedCount, 1)
             firstRegistrationTime = Date.timeIntervalSinceReferenceDate
             resolvedTime = nil
+            startContentTime = nil
         } else {
             // Update maxExpectedCount if a larger count is seen (handles delayed OS discovery).
             maxExpectedCount = max(maxExpectedCount, expectedCount)
@@ -92,7 +99,9 @@ final class ScreenSyncCoordinator {
         phaseAdvanceRequestedIDs.remove(id)
         if registeredIDs.isEmpty {
             resolvedTime = nil
+            startContentTime = nil
             restartResolvedTime = nil
+            restartContentTime = nil
             phaseAdvanceResolvedTime = nil
             expectedCount = 0
             maxExpectedCount = 0
@@ -116,6 +125,7 @@ final class ScreenSyncCoordinator {
         guard resolvedTime == nil, !registeredIDs.isEmpty else { return }
         if registeredIDs.count >= maxExpectedCount {
             resolvedTime = Date.timeIntervalSinceReferenceDate + Self.startDelay
+            startContentTime = resolvedTime
         }
     }
 
@@ -128,6 +138,7 @@ final class ScreenSyncCoordinator {
         guard restartResolvedTime == nil, !restartRequestedIDs.isEmpty else { return }
         if restartRequestedIDs.count >= registeredIDs.count {
             restartResolvedTime = Date.timeIntervalSinceReferenceDate + Self.startDelay
+            restartContentTime = restartResolvedTime
         }
     }
 
@@ -144,6 +155,7 @@ final class ScreenSyncCoordinator {
         if elapsed >= Self.registrationTimeout {
             let time = Date.timeIntervalSinceReferenceDate + Self.startDelay
             resolvedTime = time
+            startContentTime = time
             return time
         }
         return nil
@@ -162,6 +174,7 @@ final class ScreenSyncCoordinator {
         if restartRequestedIDs.isEmpty {
             firstRestartRequestTime = Date.timeIntervalSinceReferenceDate
             restartResolvedTime = nil
+            restartContentTime = nil
         }
         restartRequestedIDs.insert(id)
 
@@ -182,6 +195,7 @@ final class ScreenSyncCoordinator {
         if elapsed >= Self.restartSafetyTimeout {
             let time = Date.timeIntervalSinceReferenceDate + Self.startDelay
             restartResolvedTime = time
+            restartContentTime = time
             return time
         }
         return nil
@@ -198,6 +212,7 @@ final class ScreenSyncCoordinator {
         restartRequestedIDs.remove(id)
         if restartRequestedIDs.isEmpty {
             restartResolvedTime = nil
+            restartContentTime = nil
         }
     }
 
@@ -264,6 +279,19 @@ final class ScreenSyncCoordinator {
         }
     }
 
+    /// Excludes a shared pause from startup and scene-barrier deadlines without unregistering views.
+    ///
+    /// - Parameter duration: Wall-clock seconds during which every participant was paused.
+    func shiftTimeline(by duration: TimeInterval) {
+        guard !registeredIDs.isEmpty else { return }
+        firstRegistrationTime += duration
+        firstRestartRequestTime += duration
+        firstPhaseAdvanceRequestTime += duration
+        if let time = resolvedTime { resolvedTime = time + duration }
+        if let time = restartResolvedTime { restartResolvedTime = time + duration }
+        if let time = phaseAdvanceResolvedTime { phaseAdvanceResolvedTime = time + duration }
+    }
+
     /// Resets the coordinator to a clean state (for testing only).
     func _resetForTesting() {
         expectedCount = 0
@@ -271,8 +299,10 @@ final class ScreenSyncCoordinator {
         registeredIDs = []
         firstRegistrationTime = 0
         resolvedTime = nil
+        startContentTime = nil
         restartRequestedIDs = []
         restartResolvedTime = nil
+        restartContentTime = nil
         firstRestartRequestTime = 0
         phaseAdvanceRequestedIDs = []
         phaseAdvanceResolvedTime = nil
