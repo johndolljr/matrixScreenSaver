@@ -25,12 +25,12 @@ def asset_url(version):
     return f"https://github.com/{REPOSITORY}/releases/download/{validate_version(version)}/{version}.zip"
 
 
-def binary_minimum(data):
+def binary_minimum(data, expected_kind=8):
     if len(data) < 32:
         raise ValueError("Truncated Mach-O header")
     magic, cpu, _, kind, count, size, _, _ = struct.unpack_from("<8I", data)
-    if magic != 0xFEEDFACF or cpu != 0x0100000C or kind != 8:
-        raise ValueError("Release must contain a thin ARM64 Mach-O bundle")
+    if magic != 0xFEEDFACF or cpu != 0x0100000C or kind != expected_kind:
+        raise ValueError("Release must contain thin ARM64 Mach-O binaries of the expected type")
     end = 32 + size
     if end > len(data):
         raise ValueError("Truncated Mach-O commands")
@@ -73,17 +73,22 @@ def render(archive_path, version, url, digest, provenance, output):
             path = PurePosixPath(entry.filename)
             if path.is_absolute() or ".." in path.parts or "\\" in entry.filename:
                 raise ValueError("Unsafe archive path")
-            if not path.parts or path.parts[0] not in ("MatrixScreenSaver.saver", "__MACOSX"):
-                raise ValueError("Unexpected saver archive layout")
+            if not path.parts or path.parts[0] not in ("MatrixScreenSaver.saver", "MatrixWallpaper.app", "__MACOSX"):
+                raise ValueError("Unexpected release archive layout")
             if (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError("Symlinks are not supported in release archives")
-        info = plistlib.loads(archive.read("MatrixScreenSaver.saver/Contents/Info.plist"))
-        if (info.get("CFBundleIdentifier") != "dev.patsch.MatrixScreenSaver"
-                or info.get("CFBundleShortVersionString") != version
-                or info.get("CFBundleVersion") != version
-                or info.get("CFBundleExecutable") != "MatrixScreenSaver"):
-            raise ValueError("Bundle identity, executable, or version mismatch")
-        minimum = binary_minimum(archive.read("MatrixScreenSaver.saver/Contents/MacOS/MatrixScreenSaver"))
+        minimum = (0, 0, 0)
+        identifiers = []
+        for name, extension, kind in [("MatrixScreenSaver", "saver", 8), ("MatrixWallpaper", "app", 2)]:
+            root = f"{name}.{extension}/Contents"
+            info = plistlib.loads(archive.read(f"{root}/Info.plist"))
+            if (info.get("CFBundleIdentifier") != f"dev.patsch.{name}"
+                    or info.get("CFBundleShortVersionString") != version
+                    or info.get("CFBundleVersion") != version
+                    or info.get("CFBundleExecutable") != name):
+                raise ValueError("Bundle identity, executable, or version mismatch")
+            identifiers.append(info["CFBundleIdentifier"])
+            minimum = max(minimum, binary_minimum(archive.read(f"{root}/MacOS/{name}"), kind))
     # Select the next known OS floor, never silently understate the binary requirement.
     if minimum <= (15, 0, 0):
         floor, symbol = "15.0", "sequoia"
@@ -99,7 +104,8 @@ def render(archive_path, version, url, digest, provenance, output):
         raise ValueError("Cask template no longer matches renderer contract")
     manifest = {"version": version, "asset_url": url, "sha256": sha256,
                 "architecture": "arm64", "minimum_macos": ".".join(map(str, minimum)),
-                "cask_macos_floor": floor, "bundle_identifier": info["CFBundleIdentifier"],
+                "cask_macos_floor": floor, "bundle_identifier": identifiers[0],
+                "bundle_identifiers": identifiers,
                 "provenance": provenance}
     output = Path(output)
     (output / "Casks").mkdir(parents=True, exist_ok=True)

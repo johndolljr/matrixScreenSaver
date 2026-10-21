@@ -23,6 +23,7 @@ import sys
 sys.path.insert(0, "Tests/Homebrew")
 from fixtures.release_fixture import write_archive
 root = Path(sys.argv[1])
+write_archive(root / "1.2.2.zip", version="1.2.2", wallpaper=False)
 for version in ("1.2.3", "1.2.4"):
     write_archive(root / f"{version}.zip", version=version)
 PY
