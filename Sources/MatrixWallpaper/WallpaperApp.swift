@@ -6,6 +6,17 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
     /// Retains the status item for the lifetime of the application.
     private var statusItem: NSStatusItem?
 
+    /// Owns login controls independently of wallpaper playback and preferences.
+    private let loginItems: LoginItemController
+
+    /// Creates the host with system login operations, or an isolated test controller.
+    ///
+    /// - Parameter loginItems: Menu controller backed by macOS registration.
+    init(loginItems: LoginItemController = LoginItemController()) {
+        self.loginItems = loginItems
+        super.init()
+    }
+
     /// Owns the native desktop surfaces until playback ends.
     private var windows: [DesktopWindow] = []
 
@@ -48,11 +59,15 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "Matrix"
         let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = loginItems
         playbackItem.target = self
         menu.addItem(playbackItem)
         let options = NSMenuItem(title: "Options…", action: #selector(showOptions(_:)), keyEquivalent: "")
         options.target = self
         menu.addItem(options)
+        menu.addItem(.separator())
+        menu.addItem(loginItems.item)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Matrix Wallpaper", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp

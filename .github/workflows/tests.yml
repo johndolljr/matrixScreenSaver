@@ -30,5 +30,8 @@ jobs:
       - name: Build wallpaper app
         run: ./build-wallpaper.sh
 
+      - name: Check wallpaper installation and rollback
+        run: ./wallpaper-install-tests.sh
+
       - name: Run wallpaper AppKit checks
         run: ./wallpaper-tests.sh

@@ -14,7 +14,7 @@ BUNDLE_VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 mkdir -p "$BUNDLE_DIR/Contents/MacOS"
 
 swiftc -O -module-name MatrixWallpaper \
-  -framework Foundation -framework AppKit -framework ScreenSaver \
+  -framework Foundation -framework AppKit -framework ScreenSaver -framework ServiceManagement \
   "$SOURCE_DIR/TerminalSupport.swift" \
   "$SOURCE_DIR/MatrixScreenSaverOptions.swift" \
   "$SOURCE_DIR/Xorshift64.swift" \
@@ -25,6 +25,7 @@ swiftc -O -module-name MatrixWallpaper \
   "$SOURCE_DIR/MatrixScreenSaverView.swift" \
   "$WALLPAPER_DIR/DesktopWindow.swift" \
   "$WALLPAPER_DIR/WallpaperPlaybackState.swift" \
+  "$WALLPAPER_DIR/LoginItemController.swift" \
   "$WALLPAPER_DIR/WallpaperApp.swift" \
   "$WALLPAPER_DIR/main.swift" \
   -o "$BUNDLE_DIR/Contents/MacOS/MatrixWallpaper"

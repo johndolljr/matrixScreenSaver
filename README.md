@@ -49,7 +49,35 @@ Build and launch the separate native menu bar app:
 open build/MatrixWallpaper.app
 ```
 
-The **Matrix** menu provides **Start / Stop**, **Options…**, and **Quit**.
+To install a stable copy in your user Applications folder:
+
+```bash
+./install-wallpaper.sh
+open ~/Applications/MatrixWallpaper.app
+```
+
+The installer gracefully quits running Matrix Wallpaper copies before building or
+updating, and cancels if they do not quit within five seconds. It builds and
+verifies the app before replacing an existing installation; preferences
+are kept outside the bundle. It does not launch the app or enable login startup.
+You can also double-click the installed app in Finder. It appears in the menu bar,
+not the Dock.
+
+The **Matrix** menu provides **Start / Stop**, **Options…**, one **Launch at Login**
+checkbox, and **Quit**. On macOS 13+, Launch at Login uses the
+system's registration, and refreshes whenever the menu opens so changes made in
+System Settings are reflected. Checking registers and enables startup; unchecking
+stops future login launches. Apple's API does this by unregistering, so keeping a
+disabled entry visible in System Settings is not guaranteed. An unchecked item
+marked **Approval Required** means macOS has not granted approval (or approval was
+revoked). Settings opens automatically when approval is needed; clicking the
+unapproved item opens Settings again without removing its registration. Errors are
+reported without claiming startup is enabled. Disabling startup does not stop the
+current wallpaper, and Quit does not disable startup. Older macOS versions support
+manual launching only. Use the installed copy when enabling startup; login and
+approval behavior still need verification on your macOS version with these
+locally ad-hoc-signed builds.
+
 It renders the real saver independently on each display, with distinct rain and
 coordinated scenes. Passive desktop-level windows leave input to Finder and do
 not change your macOS wallpaper settings. Stop or Quit reveals your existing wallpaper.
@@ -70,8 +98,8 @@ unchanged display notifications on wake do not restart it.
 Lock and saver detection supplements public workspace notifications with
 best-effort macOS distributed signals; delivery is not guaranteed.
 
-No automatic login startup, System Settings wallpaper registration, or private
-Wallpaper.framework integration is installed. The existing `.saver` build and
+No System Settings wallpaper registration or private Wallpaper.framework
+integration is installed. The existing `.saver` build and
 installation remain separate. Desktop behavior across widgets, Spaces, Show Desktop,
 Stage Manager, and fullscreen apps should be checked on the macOS version you use.
 
@@ -79,12 +107,18 @@ Run the additional AppKit checks from a logged-in graphical macOS session:
 
 ```bash
 ./wallpaper-tests.sh
+./wallpaper-install-tests.sh # requires a built wallpaper app; uses a temporary HOME
 ```
 
 These check native animation, passive windows, shared options UI, menu actions,
 notification-driven suspension, display reconciliation, and cleanup. They briefly
 create desktop windows and open Options; they do not alter your saved saver settings.
-Actual lock/sleep/saver transitions and physical display hotplug still need live checks.
+Login-item tests substitute system operations and do not change your real login
+items. Installer checks exercise copying, verification, replacement, and rollback
+without touching your Applications folder. Actual login startup (one instance
+after logout/login, then none after disabling), System Settings approval and
+synchronization, lock/sleep/saver transitions, and physical display hotplug still
+need live checks.
 
 ### Current state
 
