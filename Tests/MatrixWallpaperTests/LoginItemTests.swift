@@ -80,8 +80,11 @@ func loginItemTests() {
     let host = WallpaperApp(loginItems: controller)
     host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     let hostMenu = controller.item.menu!
-    check(hostMenu.delegate === controller && hostMenu.items.filter { $0.target === controller }.count == 1,
+    status = .notRegistered
+    hostMenu.delegate?.menuWillOpen?(hostMenu)
+    check(hostMenu.items.filter { $0.target === controller }.count == 1 && controller.item.state == .off,
           "host menu contains exactly one login control and refreshes system status")
+    status = .enabled
     let windows = Set(NSApp.windows.filter { $0 is DesktopWindow && $0.isVisible }.map(ObjectIdentifier.init))
     hostMenu.delegate?.menuWillOpen?(hostMenu)
     hostMenu.performActionForItem(at: hostMenu.index(of: controller.item))

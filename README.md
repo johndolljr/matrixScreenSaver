@@ -1,10 +1,13 @@
-# macOS Matrix Screen Saver and Wallpaper
+# macOS Matrix Screen Saver and animated Wallpaper
 
 ![macOS Matrix Screen Saver demo](docs/matrix-screensaver.gif)
 
 This is a macOS screen saver based on the iconic rain of characters and symbols known from the movie The Matrix.
 
-It also comes with an app replacing your wallpaper with the screen saver animation if you wish so. 
+## Animated Wallpaper
+The screen saver also comes with an app replacing your wallpaper with the animation so you can enjoy being in the matrix all the time 🙂.
+
+![wallpaper-icon.jpg](docs/wallpaper-icon.jpg)
 
 ## Quick install
 
@@ -16,8 +19,6 @@ brew install --cask patrickschaper/tap/matrix-screen-saver
 - Wallpaper: open **MatrixWallpaper** in Applications.
 - Saver options: **System Settings → Wallpaper → Screen Saver → MatrixScreenSaver → Options…**.
 
-While MatrixWallpaper is running, the screen saver continues the same animation on each display, and the wallpaper carries on when it ends. Without the app, the saver runs independently. Previews remain independent.
-
 ## Buy me a coffee
 
 There is no spoon. There is coffee. Donations help fund a developer license for signing the screen saver.
@@ -25,7 +26,7 @@ There is no spoon. There is coffee. Donations help fund a developer license for 
 <a href="https://www.buymeacoffee.com/yesman82"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="150"></a><br>
 <img src="docs/bmc_qr.png" alt="Buy Me a Coffee QR code" width="150">
 
-## Options
+## Animation options
 
 The saver exposes a native **Options…** sheet. The values are stored with `ScreenSaverDefaults`.
 
@@ -44,6 +45,10 @@ The saver exposes a native **Options…** sheet. The values are stored with `Scr
 | Neo message lines | Lines typed during the Neo message intro. Between 1 and 10 lines, up to 256 characters each. | The 4 classic lines |
 | Scan lines intensity | Opacity of the CRT scan line overlay (0 = off, 100 = fully opaque). | 25 |
 | Scan lines vertical | Orientation of the scan line overlay (vertical or horizontal). | On (vertical) |
+
+### Wallpaper menubar menu
+
+![menubar.jpg](docs/wallpaper-menubar.jpg)
 
 ## Development
 
@@ -153,6 +158,12 @@ open ~/Applications/MatrixWallpaper.app
 
 The installer builds and verifies the app, gracefully quits running copies before
 replacement, and retains preferences. It does not launch the app or enable login startup.
+
+When MatrixScreenSaver is installed in `~/Library/Screen Savers` or `/Library/Screen Savers`,
+the wallpaper menu shows **Sync with Screen Saver**. It is checked by default: the saver
+shares the wallpaper's animation. Uncheck it to let the saver animate independently.
+The choice survives app restarts and saver reinstallation; opening the menu refreshes
+installation detection. This does not change visual options or synchronization between monitors.
 
 ### Origin
 

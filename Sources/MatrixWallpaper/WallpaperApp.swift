@@ -2,19 +2,36 @@ import AppKit
 import ScreenSaver
 
 /// Menu bar host for native Matrix animation behind desktop content.
-final class WallpaperApp: NSObject, NSApplicationDelegate {
+final class WallpaperApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Retains the status item for the lifetime of the application.
     private var statusItem: NSStatusItem?
 
     /// Owns login controls independently of wallpaper playback and preferences.
     private let loginItems: LoginItemController
 
+    /// Wallpaper-only preferences, separate from shared rendering options.
+    private let defaults: UserDefaults
+    /// Installed saver locations, replaceable with temporary directories in tests.
+    private let screenSaverDirectories: [URL]
+    /// Persists user intent even while no saver is installed.
+    private static let syncPreferenceKey = "syncWithScreenSaver"
+    /// Reflects whether the wallpaper may serve frames to the saver.
+    private let syncItem = NSMenuItem(title: "Sync with Screen Saver", action: #selector(toggleScreenSaverSync(_:)), keyEquivalent: "")
+
     /// Creates the host with system login operations, or an isolated test controller.
     ///
-    /// - Parameter loginItems: Menu controller backed by macOS registration.
-    init(loginItems: LoginItemController = LoginItemController()) {
+    /// - Parameters:
+    ///   - loginItems: Menu controller backed by macOS registration.
+    ///   - defaults: Store for wallpaper-only preferences.
+    ///   - screenSaverDirectories: User and local installed-saver directories.
+    init(loginItems: LoginItemController = LoginItemController(), defaults: UserDefaults = .standard,
+         screenSaverDirectories: [URL] = FileManager.default.urls(for: .libraryDirectory, in: [.userDomainMask, .localDomainMask])
+            .map { $0.appendingPathComponent("Screen Savers") }) {
         self.loginItems = loginItems
+        self.defaults = defaults
+        self.screenSaverDirectories = screenSaverDirectories
         super.init()
+        defaults.register(defaults: [Self.syncPreferenceKey: true])
     }
 
     /// Owns the native desktop surfaces until playback ends.
@@ -71,12 +88,14 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
         item.button?.setAccessibilityLabel("Matrix Wallpaper")
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.delegate = loginItems
+        menu.delegate = self
         playbackItem.target = self
         menu.addItem(playbackItem)
         let options = NSMenuItem(title: "Options…", action: #selector(showOptions(_:)), keyEquivalent: "")
         options.target = self
         menu.addItem(options)
+        syncItem.target = self
+        menu.addItem(syncItem)
         menu.addItem(.separator())
         menu.addItem(loginItems.item)
         menu.addItem(.separator())
@@ -85,6 +104,7 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
+        menuWillOpen(menu)
 
         observeSystemState()
         frameLeaseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -111,6 +131,33 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
             return CGDisplayIsAsleep(id) != 0
         })
         reconcilePlayback()
+    }
+
+    /// Refreshes both optional controls when installations or system settings change.
+    func menuWillOpen(_ menu: NSMenu) {
+        loginItems.menuWillOpen(menu)
+        syncItem.state = defaults.bool(forKey: Self.syncPreferenceKey) ? .on : .off
+        syncItem.isHidden = !screenSaverDirectories.contains { directory in
+            let bundles = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+            return bundles.contains { url in
+                guard url.pathExtension.lowercased() == "saver",
+                      let data = try? Data(contentsOf: url.appendingPathComponent("Contents/Info.plist")),
+                      let metadata = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+                else { return false }
+                return metadata["CFBundleIdentifier"] as? String == "dev.patsch.MatrixScreenSaver"
+            }
+        }
+    }
+
+    /// Stores the choice without changing the wallpaper's requested playback state.
+    @objc private func toggleScreenSaverSync(_ sender: Any?) {
+        let enabled = !defaults.bool(forKey: Self.syncPreferenceKey)
+        defaults.set(enabled, forKey: Self.syncPreferenceKey)
+        syncItem.state = enabled ? .on : .off
+        if !enabled {
+            endFrameSharing()
+            reconcilePlayback()
+        }
     }
 
     /// Starts or stops at the user's request without overriding system suspension.
@@ -273,7 +320,8 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
     ///
     /// - Parameter displayID: Display requested through the sandbox-safe discovery notification.
     private func shareFrames(for displayID: UInt32) {
-        guard playback.isRequested, currentDisplayLayout.contains(where: { $0.id == displayID }) else { return }
+        guard defaults.bool(forKey: Self.syncPreferenceKey), playback.isRequested,
+              currentDisplayLayout.contains(where: { $0.id == displayID }) else { return }
         let starting = !playback.isServingScreenSaver
         if starting {
             let options = MatrixScreenSaverView.loadSaverOptions()
