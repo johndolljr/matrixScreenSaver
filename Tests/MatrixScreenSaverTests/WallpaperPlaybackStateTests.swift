@@ -26,4 +26,16 @@ func wallpaperPlaybackStateTests() {
     state.setSuspended(.displaysSleeping, false)
     state.setSuspended(.displaysSleeping, false)
     ok(state.shouldRun, "WallpaperPlaybackState: duplicate resume notifications are harmless")
+    state.setSuspended(.screenSaver, true)
+    state.setSuspended(.locked, true)
+    state.isServingScreenSaver = true
+    ok(state.shouldRun && !state.shouldShowDesktop, "WallpaperPlaybackState: shared saver keeps rendering behind the lock screen")
+    state.setSuspended(.displaysSleeping, true)
+    ok(!state.shouldRun, "WallpaperPlaybackState: sharing never overrides display sleep")
+    state.setSuspended(.displaysSleeping, false)
+    state.setSuspended(.sessionInactive, true)
+    ok(!state.shouldRun, "WallpaperPlaybackState: sharing never overrides an inactive login session")
+    state.setSuspended(.sessionInactive, false)
+    state.isServingScreenSaver = false
+    ok(!state.shouldRun, "WallpaperPlaybackState: expired consumers restore ordinary lock and saver suspension")
 }

@@ -26,6 +26,26 @@ func wait(_ seconds: TimeInterval) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 app.finishLaunching()
+if CommandLine.arguments.contains("--consumer-host") {
+    consumerHostTests()
+    exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)
+}
+if CommandLine.arguments.contains("--composition-benchmark") {
+    compositionBenchmark()
+    exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)
+}
+if CommandLine.arguments.contains("--composition-tests") {
+    sharedCompositionTests()
+    exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)
+}
+if CommandLine.arguments.contains("--gpu-composition-tests") {
+    gpuCompositionFeasibilityTests()
+    exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)
+}
+if CommandLine.arguments.contains("--gpu-composition-benchmark") {
+    gpuCompositionFeasibilityTests(benchmark: true)
+    exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)
+}
 guard let screen = NSScreen.main,
       let saver = MatrixScreenSaverView(frame: NSRect(x: 0, y: 0, width: 640, height: 360), isPreview: false) else {
     fatalError("Wallpaper self-check requires a logged-in graphical macOS session")
@@ -55,6 +75,7 @@ check(stopped != nil && pixels(of: saver) == stopped, "native animation stays st
 window.close()
 check(!window.isVisible, "closing removes the desktop window")
 sharedSaverTests()
+sharedCompositionTests()
 wallpaperAppTests()
 loginItemTests()
 exit(failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE)

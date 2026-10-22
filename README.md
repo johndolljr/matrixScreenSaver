@@ -16,6 +16,8 @@ brew install --cask patrickschaper/tap/matrix-screen-saver
 - Wallpaper: open **MatrixWallpaper** in Applications.
 - Saver options: **System Settings → Wallpaper → Screen Saver → MatrixScreenSaver → Options…**.
 
+While MatrixWallpaper is running, the screen saver continues the same animation on each display, and the wallpaper carries on when it ends. Without the app, the saver runs independently. Previews remain independent.
+
 ## Buy me a coffee
 
 There is no spoon. There is coffee. Donations help fund a developer license for signing the screen saver.

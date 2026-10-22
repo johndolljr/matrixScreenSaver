@@ -28,6 +28,61 @@ func wallpaperAppTests() {
     NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
     check(Set(NSApp.windows.filter { $0 is DesktopWindow && $0.isVisible }.map(ObjectIdentifier.init)) == originalIDs,
           "unchanged display notifications do not restart a resumed scene")
+    if let source = originalWindows.first?.contentView as? MatrixScreenSaverView,
+       let screen = originalWindows.first?.screen,
+       let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 {
+        var reader: WallpaperFrameReader? = WallpaperFrameReader()
+        _ = reader?.frame(displayID: displayID, pointSize: source.bounds.size)
+        var first: SharedWallpaperFrame.Frame?
+        let deadline = Date(timeIntervalSinceNow: 10)
+        repeat {
+            wait(0.1)
+            first = reader?.frame(displayID: displayID, pointSize: source.bounds.size)
+        } while first == nil && Date() < deadline
+        check(first != nil, "host discovery publishes a matching display without restarting its renderer")
+        let distributed = DistributedNotificationCenter.default()
+        distributed.postNotificationName(Notification.Name("com.apple.screensaver.willstart"), object: nil,
+                                         userInfo: nil, deliverImmediately: true)
+        wait(0.2)
+        check(desktopWindowCount() == 0 && source.isAnimating,
+              "active saver consumers hide desktop windows but keep their sole renderer running")
+        wait(0.6)
+        let next = reader?.frame(displayID: displayID, pointSize: source.bounds.size)
+        check(next != nil && next!.sequence > (first?.sequence ?? 0),
+              "hidden wallpaper publishes advancing frames for the saver")
+        if let other = originalWindows.first(where: {
+            ($0.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32) != displayID
+        }), let otherSource = other.contentView as? MatrixScreenSaverView,
+           let otherID = other.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 {
+            var otherReader: WallpaperFrameReader? = WallpaperFrameReader()
+            var otherFrame: SharedWallpaperFrame.Frame?
+            let deadline = Date(timeIntervalSinceNow: 10)
+            repeat {
+                _ = reader?.frame(displayID: displayID, pointSize: source.bounds.size)
+                otherFrame = otherReader?.frame(displayID: otherID, pointSize: otherSource.bounds.size)
+                wait(0.1)
+            } while otherFrame == nil && Date() < deadline
+            check(otherFrame != nil, "each display offers its own matching wallpaper frame")
+            let otherURL = otherSource.shareWallpaperFrames()
+            otherReader = nil
+            let expiry = Date(timeIntervalSinceNow: SharedWallpaperFrame.freshnessInterval + 0.6)
+            while Date() < expiry {
+                _ = reader?.frame(displayID: displayID, pointSize: source.bounds.size)
+                wait(0.1)
+            }
+            check(otherURL != nil && !FileManager.default.fileExists(atPath: otherURL!.path) && source.isAnimating,
+                  "one display's consumer expiry releases its buffer while another stays connected")
+        }
+        reader = nil
+        wait(SharedWallpaperFrame.freshnessInterval + 0.6)
+        check(!source.isAnimating && desktopWindowCount() == 0,
+              "an expired consumer lease stops hidden rendering without discarding the session")
+        distributed.postNotificationName(Notification.Name("com.apple.screensaver.didstop"), object: nil,
+                                         userInfo: nil, deliverImmediately: true)
+        wait(0.2)
+        check(source.isAnimating && Set(NSApp.windows.filter { $0 is DesktopWindow && $0.isVisible }.map(ObjectIdentifier.init)) == originalIDs,
+              "saver exit reveals the same wallpaper views without replaying the intro")
+    }
     workspace.post(name: NSWorkspace.willSleepNotification, object: nil)
 
     check(NSApp.sendAction(NSSelectorFromString("togglePlayback:"), to: host, from: nil), "Stop menu action is connected")

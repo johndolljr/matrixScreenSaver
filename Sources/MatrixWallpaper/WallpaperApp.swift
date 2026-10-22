@@ -38,6 +38,9 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
     /// Options currently applied to the preserved session.
     private var currentOptions = MatrixScreenSaverOptions()
 
+    private var frameRequests: [UInt32: TimeInterval] = [:]
+    private var frameLeaseTimer: Timer?
+
     /// Captured display geometry distinguishes real topology changes from wake notifications.
     private struct DisplayLayout: Equatable {
         let id: UInt32
@@ -84,6 +87,22 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
         statusItem = item
 
         observeSystemState()
+        frameLeaseTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            let expired = self.frameRequests.filter { now - $0.value >= SharedWallpaperFrame.freshnessInterval }
+            guard !expired.isEmpty else { return }
+            for id in expired.keys { self.frameRequests.removeValue(forKey: id) }
+            for window in self.windows {
+                guard let id = window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32,
+                      expired[id] != nil else { continue }
+                (window.contentView as? MatrixScreenSaverView)?.stopSharingWallpaperFrames()
+            }
+            if self.frameRequests.isEmpty {
+                self.endFrameSharing()
+                self.reconcilePlayback()
+            }
+        }
         if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
             playback.setSuspended(.sessionInactive, (session[kCGSessionOnConsoleKey as String] as? Bool) == false)
         }
@@ -152,36 +171,44 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
             let duration = Date.timeIntervalSinceReferenceDate - suspendedAt
             ScreenSyncCoordinator.shared.shiftTimeline(by: duration)
             for window in windows {
-                window.orderBack(nil)
                 (window.contentView as? MatrixScreenSaverView)?.resumeWallpaperAnimation(after: duration)
             }
             self.suspendedAt = nil
         }
-        guard windows.isEmpty else { return }
-        currentOptions = MatrixScreenSaverView.loadSaverOptions()
-        displayLayout = currentDisplayLayout
-        for screen in NSScreen.screens {
-            guard let saver = MatrixScreenSaverView(frame: NSRect(origin: .zero, size: screen.frame.size), isPreview: false) else {
-                let alert = NSAlert()
-                alert.messageText = "Could not start Matrix Wallpaper"
-                alert.informativeText = "The native screen saver view could not be created."
-                alert.runModal()
-                NSApp.terminate(nil)
-                return
+        if windows.isEmpty {
+            currentOptions = MatrixScreenSaverView.loadSaverOptions()
+            displayLayout = currentDisplayLayout
+            for screen in NSScreen.screens {
+                guard let saver = MatrixScreenSaverView(frame: NSRect(origin: .zero, size: screen.frame.size), isPreview: false) else {
+                    let alert = NSAlert()
+                    alert.messageText = "Could not start Matrix Wallpaper"
+                    alert.informativeText = "The native screen saver view could not be created."
+                    alert.runModal()
+                    NSApp.terminate(nil)
+                    return
+                }
+                saver.isWallpaperHost = true
+                saver.rendersWallpaperWhileHidden = playback.isServingScreenSaver
+                let window = DesktopWindow(screen: screen, saverView: saver)
+                windows.append(window)
             }
-            saver.isWallpaperHost = true
-            let window = DesktopWindow(screen: screen, saverView: saver)
-            windows.append(window)
+            // Attach every display before starting registration and the framework's animation timers.
+            for window in windows {
+                if playback.shouldShowDesktop { window.orderBack(nil) }
+                (window.contentView as? ScreenSaverView)?.startAnimation()
+            }
         }
-        // Attach every display before starting registration and the framework's animation timers.
         for window in windows {
-            window.orderBack(nil)
-            (window.contentView as? ScreenSaverView)?.startAnimation()
+            (window.contentView as? MatrixScreenSaverView)?.rendersWallpaperWhileHidden = playback.isServingScreenSaver
+            if playback.shouldShowDesktop {
+                if !window.isVisible { window.orderBack(nil) }
+            } else if window.isVisible { window.orderOut(nil) }
         }
     }
 
     /// Unregisters every view before closing any window or starting a replacement session.
     private func removeDesktopWindows() {
+        endFrameSharing()
         for window in windows { (window.contentView as? ScreenSaverView)?.stopAnimation() }
         for window in windows {
             window.close()
@@ -202,6 +229,12 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
             observeSuspension(in: workspace, start: start, end: end, reason: reason)
         }
         let distributed = DistributedNotificationCenter.default()
+        let frameRequests = distributed.addObserver(forName: SharedWallpaperFrame.requestNotification,
+            object: nil, queue: .main) { [weak self] notification in
+                guard let id = notification.object as? String, let displayID = UInt32(id) else { return }
+                self?.shareFrames(for: displayID)
+            }
+        observers.append((distributed, frameRequests))
         // These names are best-effort macOS observations, not a documented lock/security contract.
         observeSuspension(in: distributed, start: Notification.Name("com.apple.screenIsLocked"),
                           end: Notification.Name("com.apple.screenIsUnlocked"), reason: .locked)
@@ -231,12 +264,46 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
 
     /// Applies a system condition without starting a stopped or still-suspended session.
     private func setSuspended(_ reason: WallpaperPlaybackState.Suspension, _ suspended: Bool) {
+        if reason == .screenSaver && !suspended { endFrameSharing() }
         playback.setSuspended(reason, suspended)
         reconcilePlayback()
     }
 
+    /// Wakes the existing session for a matching saver, then offers only that display's pixels.
+    ///
+    /// - Parameter displayID: Display requested through the sandbox-safe discovery notification.
+    private func shareFrames(for displayID: UInt32) {
+        guard playback.isRequested, currentDisplayLayout.contains(where: { $0.id == displayID }) else { return }
+        let starting = !playback.isServingScreenSaver
+        if starting {
+            let options = MatrixScreenSaverView.loadSaverOptions()
+            if options != currentOptions { applyOptions(options) }
+        }
+        frameRequests[displayID] = ProcessInfo.processInfo.systemUptime
+        playback.isServingScreenSaver = true
+        if starting { reconcilePlayback() }
+        guard playback.shouldRun else { return }
+        for window in windows {
+            guard let id = window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32,
+                  id == displayID, let saver = window.contentView as? MatrixScreenSaverView,
+                  let url = saver.shareWallpaperFrames() else { continue }
+            DistributedNotificationCenter.default().postNotificationName(SharedWallpaperFrame.offerNotification,
+                object: url.path, userInfo: nil, deliverImmediately: true)
+        }
+    }
+
+    private func endFrameSharing() {
+        frameRequests.removeAll()
+        playback.isServingScreenSaver = false
+        for window in windows {
+            (window.contentView as? MatrixScreenSaverView)?.stopSharingWallpaperFrames()
+        }
+    }
+
     /// Removes observers and native animation work before the process exits.
     func applicationWillTerminate(_ notification: Notification) {
+        frameLeaseTimer?.invalidate()
+        frameLeaseTimer = nil
         for (center, token) in observers { center.removeObserver(token) }
         observers.removeAll()
         removeDesktopWindows()

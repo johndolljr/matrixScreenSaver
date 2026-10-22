@@ -15,12 +15,15 @@ swiftc \
   "$SRC/NeoMessageScene.swift" \
   "$SRC/MatrixRendererLimits.swift" \
   "$SRC/ScreenSyncCoordinator.swift" \
+  "$SRC/SharedWallpaperFrame.swift" \
+  "$SRC/WallpaperFrameReader.swift" \
   "$SRC/NativeMatrixRenderer.swift" \
   "$ROOT/Sources/MatrixWallpaper/WallpaperPlaybackState.swift" \
   "$TESTS/Xorshift64Tests.swift" \
   "$TESTS/ScreenSyncCoordinatorTests.swift" \
   "$TESTS/NativeMatrixRendererTests.swift" \
   "$TESTS/WallpaperPlaybackStateTests.swift" \
+  "$TESTS/SharedWallpaperFrameTests.swift" \
   "$TESTS/main.swift" \
   -o "$TEST_BIN"
 

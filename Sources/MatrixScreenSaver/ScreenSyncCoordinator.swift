@@ -26,6 +26,8 @@ final class ScreenSyncCoordinator {
     private var expectedCount = 0
     private var maxExpectedCount = 0
     private var registeredIDs: Set<ObjectIdentifier> = []
+    /// Shared consumers and immediate fallbacks are live displays, but not native barrier participants.
+    private var excludedIDs: Set<ObjectIdentifier> = []
     private var firstRegistrationTime: TimeInterval = 0
     private var resolvedTime: TimeInterval?
 
@@ -71,6 +73,7 @@ final class ScreenSyncCoordinator {
     ///   - id: Unique identity of the registering view (use `ObjectIdentifier`).
     ///   - expectedCount: Total number of displays (typically `NSScreen.screens.count`).
     func register(_ id: ObjectIdentifier, expectedCount: Int) {
+        excludedIDs.remove(id)
         if registeredIDs.isEmpty {
             self.expectedCount = max(expectedCount, 1)
             self.maxExpectedCount = max(expectedCount, 1)
@@ -94,6 +97,7 @@ final class ScreenSyncCoordinator {
     ///
     /// - Parameter id: Unique identity of the unregistering view.
     func unregister(_ id: ObjectIdentifier) {
+        excludedIDs.remove(id)
         registeredIDs.remove(id)
         restartRequestedIDs.remove(id)
         phaseAdvanceRequestedIDs.remove(id)
@@ -116,6 +120,15 @@ final class ScreenSyncCoordinator {
         }
     }
 
+    /// Removes a live display from native startup and scene barriers without counting it as missing.
+    ///
+    /// - Parameter id: View presenting shared frames or running an immediate independent fallback.
+    func excludeFromSynchronization(_ id: ObjectIdentifier) {
+        unregister(id)
+        excludedIDs.insert(id)
+        tryResolveStart()
+    }
+
     /// Attempts to resolve startup time if all currently-registered displays
     /// have registered.
     ///
@@ -123,7 +136,7 @@ final class ScreenSyncCoordinator {
     /// so the coordinator can resolve as soon as all live displays have registered.
     private func tryResolveStart() {
         guard resolvedTime == nil, !registeredIDs.isEmpty else { return }
-        if registeredIDs.count >= maxExpectedCount {
+        if registeredIDs.count >= max(maxExpectedCount - excludedIDs.count, 1) {
             resolvedTime = Date.timeIntervalSinceReferenceDate + Self.startDelay
             startContentTime = resolvedTime
         }
@@ -297,6 +310,7 @@ final class ScreenSyncCoordinator {
         expectedCount = 0
         maxExpectedCount = 0
         registeredIDs = []
+        excludedIDs = []
         firstRegistrationTime = 0
         resolvedTime = nil
         startContentTime = nil

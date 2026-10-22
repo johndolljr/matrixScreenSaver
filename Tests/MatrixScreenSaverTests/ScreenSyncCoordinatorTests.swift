@@ -5,6 +5,25 @@ func screenSyncCoordinatorTests() {
     do {
         let coordinator = ScreenSyncCoordinator.shared
         coordinator._resetForTesting()
+        let native = NSObject(), shared = NSObject()
+        coordinator.register(ObjectIdentifier(native), expectedCount: 2)
+        coordinator.excludeFromSynchronization(ObjectIdentifier(shared))
+        ok(coordinator.registeredCount == 1 && coordinator.resolvedStartTime() != nil,
+           "ScreenSyncCoordinator: shared consumers do not delay a remaining native display")
+        coordinator.unregister(ObjectIdentifier(native))
+        coordinator.register(ObjectIdentifier(native), expectedCount: 2)
+        ok(coordinator.resolvedStartTime() != nil,
+           "ScreenSyncCoordinator: known shared consumers remain excluded when native startup begins later")
+        coordinator.unregister(ObjectIdentifier(native))
+        coordinator.unregister(ObjectIdentifier(shared))
+        coordinator.register(ObjectIdentifier(native), expectedCount: 2)
+        ok(coordinator.resolvedStartTime() == nil,
+           "ScreenSyncCoordinator: stopped shared consumers do not leak into the next session")
+        coordinator.unregister(ObjectIdentifier(native))
+    }
+    do {
+        let coordinator = ScreenSyncCoordinator.shared
+        coordinator._resetForTesting()
         let participant = NSObject()
         let id = ObjectIdentifier(participant)
         coordinator.register(id, expectedCount: 1)
