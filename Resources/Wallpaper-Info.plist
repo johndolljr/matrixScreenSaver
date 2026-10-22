@@ -8,6 +8,8 @@
     <string>dev.patsch.MatrixWallpaper</string>
     <key>CFBundleName</key>
     <string>Matrix Wallpaper</string>
+    <key>CFBundleIconFile</key>
+    <string>WallpaperIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

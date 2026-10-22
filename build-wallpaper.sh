@@ -11,7 +11,7 @@ if [[ ! -s "$ROOT_DIR/VERSION" ]]; then
   exit 1
 fi
 BUNDLE_VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
-mkdir -p "$BUNDLE_DIR/Contents/MacOS"
+mkdir -p "$BUNDLE_DIR/Contents/MacOS" "$BUNDLE_DIR/Contents/Resources"
 
 swiftc -O -module-name MatrixWallpaper \
   -framework Foundation -framework AppKit -framework ScreenSaver -framework ServiceManagement \
@@ -31,6 +31,7 @@ swiftc -O -module-name MatrixWallpaper \
   -o "$BUNDLE_DIR/Contents/MacOS/MatrixWallpaper"
 
 cp "$ROOT_DIR/Resources/Wallpaper-Info.plist" "$BUNDLE_DIR/Contents/Info.plist"
+cp "$ROOT_DIR/Resources/WallpaperIcon.icns" "$ROOT_DIR/Resources/MenuBarIcon.pdf" "$BUNDLE_DIR/Contents/Resources/"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUNDLE_VERSION" "$BUNDLE_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUNDLE_VERSION" "$BUNDLE_DIR/Contents/Info.plist"
 plutil -lint "$BUNDLE_DIR/Contents/Info.plist" >/dev/null

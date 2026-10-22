@@ -57,7 +57,15 @@ final class WallpaperApp: NSObject, NSApplicationDelegate {
     /// Creates menu controls and begins observing desktop playback conditions.
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "Matrix"
+        if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "pdf"),
+           let image = NSImage(contentsOf: url) {
+            image.isTemplate = true
+            item.button?.image = image
+        } else {
+            item.button?.title = "M"
+        }
+        item.button?.toolTip = "Matrix Wallpaper"
+        item.button?.setAccessibilityLabel("Matrix Wallpaper")
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.delegate = loginItems
