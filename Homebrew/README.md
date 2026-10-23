@@ -24,8 +24,11 @@ brew style "$PWD/Homebrew/Casks/matrix-screen-saver.rb"
 
 ```bash
 brew trust --cask patrickschaper/tap/matrix-screen-saver
-brew install --cask patrickschaper/tap/matrix-screen-saver
+brew install --cask patrickschaper/tap/matrix-screen-saver && open /Applications/MatrixWallpaper.app
 ```
+
+The command launches the wallpaper app after installation succeeds, using Homebrew's
+default `/Applications` location. If you use a custom `--appdir`, adjust the `open` path.
 
 The fully qualified install trusts this cask, not the entire tap. Explicit
 `brew trust --cask` also permits subsequent installs using the short name.
@@ -40,8 +43,8 @@ After installation, open **System Settings > Wallpaper > Screen Saver** and
 select **MatrixScreenSaver** manually. Modern Homebrew's sandbox blocks opening
 Settings, so automatic opening was intentionally removed. The cask never selects
 the saver, launches the wallpaper on a fresh install, enables login startup, or opens
-a browser. Open **MatrixWallpaper** from Homebrew's configured `appdir` (normally
-`/Applications`) yourself, then use its single **Launch at Login** checkbox if wanted.
+a browser. The command above launches **MatrixWallpaper** from your shell after Homebrew
+finishes; use its single **Launch at Login** checkbox if wanted.
 Homebrew may reopen an already-running app following an upgrade. Successful install,
 upgrade, and reinstall print:
 
