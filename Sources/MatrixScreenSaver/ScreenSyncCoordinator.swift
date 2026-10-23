@@ -26,8 +26,16 @@ final class ScreenSyncCoordinator {
     private var expectedCount = 0
     private var maxExpectedCount = 0
     private var registeredIDs: Set<ObjectIdentifier> = []
+    /// Shared consumers and immediate fallbacks are live displays, but not native barrier participants.
+    private var excludedIDs: Set<ObjectIdentifier> = []
     private var firstRegistrationTime: TimeInterval = 0
     private var resolvedTime: TimeInterval?
+
+    /// Immutable startup date used for scripted content and seeds even if playback clocks pause.
+    private(set) var startContentTime: TimeInterval?
+
+    /// Immutable content date for the currently resolved rain restart.
+    private(set) var restartContentTime: TimeInterval?
 
     /// Instances that have requested a rain restart.
     private var restartRequestedIDs: Set<ObjectIdentifier> = []
@@ -65,11 +73,13 @@ final class ScreenSyncCoordinator {
     ///   - id: Unique identity of the registering view (use `ObjectIdentifier`).
     ///   - expectedCount: Total number of displays (typically `NSScreen.screens.count`).
     func register(_ id: ObjectIdentifier, expectedCount: Int) {
+        excludedIDs.remove(id)
         if registeredIDs.isEmpty {
             self.expectedCount = max(expectedCount, 1)
             self.maxExpectedCount = max(expectedCount, 1)
             firstRegistrationTime = Date.timeIntervalSinceReferenceDate
             resolvedTime = nil
+            startContentTime = nil
         } else {
             // Update maxExpectedCount if a larger count is seen (handles delayed OS discovery).
             maxExpectedCount = max(maxExpectedCount, expectedCount)
@@ -87,12 +97,15 @@ final class ScreenSyncCoordinator {
     ///
     /// - Parameter id: Unique identity of the unregistering view.
     func unregister(_ id: ObjectIdentifier) {
+        excludedIDs.remove(id)
         registeredIDs.remove(id)
         restartRequestedIDs.remove(id)
         phaseAdvanceRequestedIDs.remove(id)
         if registeredIDs.isEmpty {
             resolvedTime = nil
+            startContentTime = nil
             restartResolvedTime = nil
+            restartContentTime = nil
             phaseAdvanceResolvedTime = nil
             expectedCount = 0
             maxExpectedCount = 0
@@ -107,6 +120,15 @@ final class ScreenSyncCoordinator {
         }
     }
 
+    /// Removes a live display from native startup and scene barriers without counting it as missing.
+    ///
+    /// - Parameter id: View presenting shared frames or running an immediate independent fallback.
+    func excludeFromSynchronization(_ id: ObjectIdentifier) {
+        unregister(id)
+        excludedIDs.insert(id)
+        tryResolveStart()
+    }
+
     /// Attempts to resolve startup time if all currently-registered displays
     /// have registered.
     ///
@@ -114,8 +136,9 @@ final class ScreenSyncCoordinator {
     /// so the coordinator can resolve as soon as all live displays have registered.
     private func tryResolveStart() {
         guard resolvedTime == nil, !registeredIDs.isEmpty else { return }
-        if registeredIDs.count >= maxExpectedCount {
+        if registeredIDs.count >= max(maxExpectedCount - excludedIDs.count, 1) {
             resolvedTime = Date.timeIntervalSinceReferenceDate + Self.startDelay
+            startContentTime = resolvedTime
         }
     }
 
@@ -128,6 +151,7 @@ final class ScreenSyncCoordinator {
         guard restartResolvedTime == nil, !restartRequestedIDs.isEmpty else { return }
         if restartRequestedIDs.count >= registeredIDs.count {
             restartResolvedTime = Date.timeIntervalSinceReferenceDate + Self.startDelay
+            restartContentTime = restartResolvedTime
         }
     }
 
@@ -144,6 +168,7 @@ final class ScreenSyncCoordinator {
         if elapsed >= Self.registrationTimeout {
             let time = Date.timeIntervalSinceReferenceDate + Self.startDelay
             resolvedTime = time
+            startContentTime = time
             return time
         }
         return nil
@@ -162,6 +187,7 @@ final class ScreenSyncCoordinator {
         if restartRequestedIDs.isEmpty {
             firstRestartRequestTime = Date.timeIntervalSinceReferenceDate
             restartResolvedTime = nil
+            restartContentTime = nil
         }
         restartRequestedIDs.insert(id)
 
@@ -182,6 +208,7 @@ final class ScreenSyncCoordinator {
         if elapsed >= Self.restartSafetyTimeout {
             let time = Date.timeIntervalSinceReferenceDate + Self.startDelay
             restartResolvedTime = time
+            restartContentTime = time
             return time
         }
         return nil
@@ -198,6 +225,7 @@ final class ScreenSyncCoordinator {
         restartRequestedIDs.remove(id)
         if restartRequestedIDs.isEmpty {
             restartResolvedTime = nil
+            restartContentTime = nil
         }
     }
 
@@ -264,15 +292,31 @@ final class ScreenSyncCoordinator {
         }
     }
 
+    /// Excludes a shared pause from startup and scene-barrier deadlines without unregistering views.
+    ///
+    /// - Parameter duration: Wall-clock seconds during which every participant was paused.
+    func shiftTimeline(by duration: TimeInterval) {
+        guard !registeredIDs.isEmpty else { return }
+        firstRegistrationTime += duration
+        firstRestartRequestTime += duration
+        firstPhaseAdvanceRequestTime += duration
+        if let time = resolvedTime { resolvedTime = time + duration }
+        if let time = restartResolvedTime { restartResolvedTime = time + duration }
+        if let time = phaseAdvanceResolvedTime { phaseAdvanceResolvedTime = time + duration }
+    }
+
     /// Resets the coordinator to a clean state (for testing only).
     func _resetForTesting() {
         expectedCount = 0
         maxExpectedCount = 0
         registeredIDs = []
+        excludedIDs = []
         firstRegistrationTime = 0
         resolvedTime = nil
+        startContentTime = nil
         restartRequestedIDs = []
         restartResolvedTime = nil
+        restartContentTime = nil
         firstRestartRequestTime = 0
         phaseAdvanceRequestedIDs = []
         phaseAdvanceResolvedTime = nil

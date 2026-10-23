@@ -5,7 +5,7 @@ require "fileutils"
 class FakeCaskDSL
   Artifact = Struct.new(:source, :target)
   attr_accessor :fail_quarantine
-  attr_reader :artifacts, :commands, :dependencies, :messages
+  attr_reader :artifacts, :commands, :dependencies, :messages, :uninstall_directives
 
   def initialize(root)
     @root = Pathname(root)
@@ -29,6 +29,12 @@ class FakeCaskDSL
     @artifacts << Artifact.new(@root/"stage"/name, @root/"custom savers"/name)
   end
 
+  def app(name)
+    @artifacts << Artifact.new(@root/"stage"/name, @root/"custom apps"/name)
+  end
+
+  def uninstall(**directives) = @uninstall_directives = directives
+
   def preflight_steps(&block)
     @steps = @preflight
     instance_eval(&block)
@@ -51,6 +57,7 @@ class FakeCaskDSL
   def expand(value)
     value.gsub("{{staged_path}}", (@root/"stage").to_s)
          .gsub("{{screen_saverdir}}", (@root/"custom savers").to_s)
+         .gsub("{{appdir}}", (@root/"custom apps").to_s)
   end
 
   def execute(steps)
@@ -61,21 +68,22 @@ class FakeCaskDSL
       @commands << [command, args, options]
       @messages.concat(args) if command == "/bin/echo" && options[:print_stdout]
       if command == "/usr/bin/xattr"
-        raise "quarantine failed" if @fail_quarantine || !@artifacts.first.source.directory?
+        raise "quarantine failed" if @fail_quarantine || !Pathname(args.last).directory?
       end
     end
   end
 
   def install(force: false)
     execute(@preflight)
-    artifact = @artifacts.first
-    if artifact.target.exist? || artifact.target.symlink?
-      raise "native conflict" unless force
-
-      FileUtils.rm_rf(artifact.target)
+    # Only models conflict rejection, not Homebrew's filesystem rollback.
+    @artifacts.each do |artifact|
+      raise "native conflict" if !force && (artifact.target.exist? || artifact.target.symlink?)
     end
-    FileUtils.mkdir_p(artifact.target.dirname)
-    FileUtils.mv(artifact.source, artifact.target)
+    @artifacts.each do |artifact|
+      FileUtils.rm_rf(artifact.target) if force
+      FileUtils.mkdir_p(artifact.target.dirname)
+      FileUtils.mv(artifact.source, artifact.target)
+    end
     execute(@postflight)
   end
 end
