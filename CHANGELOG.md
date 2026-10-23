@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+
+## [0.3.0] - 2026-10-23
+
+### Features
+
+- add Matrix desktop wallpaper with Homebrew installation (#102)
+- publish Homebrew tap updates automatically (#100)
+- distribute MatrixScreenSaver through Homebrew (#99)
+
+### Bug Fixes
+
+- avoid pure white rain highlights (#98)
+- publish release PR required checks (#95)
+- dispatch release checks on release branch (#93)
+
 ## [0.2.0] - 2026-06-10
 
 ### Features
