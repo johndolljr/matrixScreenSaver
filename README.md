@@ -13,11 +13,11 @@ The screen saver also comes with an app replacing your wallpaper with the animat
 
 ```bash
 brew trust --cask patrickschaper/tap/matrix-screen-saver
-brew install --cask patrickschaper/tap/matrix-screen-saver
+brew install --cask patrickschaper/tap/matrix-screen-saver && open /Applications/MatrixWallpaper.app
 ```
 
-- Wallpaper: open **MatrixWallpaper** in Applications.
-- Saver options: **System Settings → Wallpaper → Screen Saver → MatrixScreenSaver → Options…**.
+- Wallpaper: open **MatrixWallpaper** in Applications. options available through menubar icon.
+- Screen saver options: **System Settings → Wallpaper → Screen Saver → MatrixScreenSaver → Options…**.
 
 ## Buy me a coffee
 
