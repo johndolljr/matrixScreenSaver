@@ -4,6 +4,10 @@ build/
 DerivedData/
 out/
 
+# Local agent tooling
+.serena/
+.projectatlas/
+
 # macOS
 .DS_Store
 *.DS_Store
@@ -12,6 +16,16 @@ out/
 .LSOverride
 .localized
 __MACOSX/
+.Spotlight-V100/
+.Trashes/
+.TemporaryItems/
+.fseventsd/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
 # Editors and IDEs
 .idea/
@@ -49,6 +63,10 @@ fastlane/test_output
 *.orig
 *.swp
 *.swo
+.history/
+.vim/
+*.swn
+*.bak
 *.temp
 *.tmp
 *~

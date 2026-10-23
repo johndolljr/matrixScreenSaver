@@ -7,6 +7,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "Scripts/update-homebrew-tap.py"
 TEMPLATE = (ROOT / "Homebrew/Casks/matrix-screen-saver.rb").read_text()
+LEGACY = (ROOT / "Tests/Homebrew/fixtures/legacy-screen-saver.rb").read_text()
 
 
 def cask(version="1.2.3", digest="a" * 64, floor="sequoia"):
@@ -39,6 +40,29 @@ class TapUpdateTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("tap_update", SCRIPT)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
+
+    def test_known_saver_only_cask_migrates_without_allowing_unrelated_changes(self):
+        self.assertIn('app "MatrixWallpaper.app"', cask())
+        api = FakeAPI(LEGACY)
+        self.module.update(api, "owner/homebrew-test", "1.2.3", cask())
+        self.assertEqual(cask(), api.content)
+        self.assertEqual(1, sum(method == "PUT" for method, _, _ in api.calls))
+        for content in (LEGACY + "# unreviewed change\n",
+                        LEGACY.replace('desc "Native', 'desc "Custom Native')):
+            api = FakeAPI(content)
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                self.module.update(api, "owner/homebrew-test", "1.2.3", cask())
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+
+    def test_legacy_migration_never_rewrites_same_or_newer_version(self):
+        for version in ("0.1.0", "0.2.0"):
+            api = FakeAPI(LEGACY)
+            if version == "0.2.0":
+                with self.assertRaises(ValueError):
+                    self.module.update(api, "owner/homebrew-test", version, cask(version))
+            else:
+                self.module.update(api, "owner/homebrew-test", version, cask(version))
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
 
     def test_newer_release_is_published_once_to_default_branch(self):
         api = FakeAPI()
@@ -132,7 +156,8 @@ class TapUpdateTest(unittest.TestCase):
                 self.assertEqual((handoff / "Casks/matrix-screen-saver.rb").read_text(), api.content)
                 manifest = json.loads((handoff / "manifest.json").read_text())
                 for field, value in [("sha256", "b" * 64), ("asset_url", "https://example.com/evil.zip"),
-                                     ("cask_macos_floor", "26.0")]:
+                                     ("cask_macos_floor", "26.0"),
+                                     ("bundle_identifiers", ["dev.patsch.MatrixScreenSaver"])]:
                     with self.subTest(field=field):
                         tampered = dict(manifest, **{field: value})
                         (handoff / "manifest.json").write_text(json.dumps(tampered))

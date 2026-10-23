@@ -10,8 +10,11 @@ class DocumentationTest(unittest.TestCase):
         quick = text.split("## Quick install\n", 1)[1].split("\n## ", 1)[0]
         self.assertIn("brew trust --cask patrickschaper/tap/matrix-screen-saver", quick)
         self.assertIn("brew install --cask patrickschaper/tap/matrix-screen-saver", quick)
-        self.assertLessEqual(len(quick.strip().splitlines()), 5)
+        self.assertLessEqual(len(quick.strip().splitlines()), 7)
+        self.assertIn("open **MatrixWallpaper** in Applications", quick)
+        self.assertIn("MatrixScreenSaver → Options…", quick)
         self.assertNotIn("## Homebrew install", text)
+        self.assertNotIn("## Homebrew lifecycle", text)
         self.assertNotIn("## Manual quick install", text)
         self.assertIn("## Buy me a coffee", text)
         self.assertIn("https://www.buymeacoffee.com/yesman82", text)
@@ -24,6 +27,12 @@ class DocumentationTest(unittest.TestCase):
                        "Cask/InstallSteps", "7.0.7", "main",
                         "patrickschaper/homebrew-tap", "token pending"]:
             self.assertIn(phrase, text)
+
+    def test_maintainer_dual_bundle_lifecycle_is_documented(self):
+        maintainer = (ROOT / "Homebrew/README.md").read_text()
+        for phrase in ["both bundle", "successor", "no unconditional unregister script",
+                       "normalized structure hash", "never quits a real app"]:
+            self.assertIn(phrase, maintainer)
 
     def test_release_publishes_tap_after_verified_handoff_without_blocking_release(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()

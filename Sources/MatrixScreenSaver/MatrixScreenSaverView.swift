@@ -6,8 +6,9 @@ final class MatrixScreenSaverView: ScreenSaverView {
     private static let terminalTitle = "cxxmatrix"
     private static let screenSaverWillStopNotification = Notification.Name("com.apple.screensaver.willstop")
     private static let screenSaverDidStopNotification = Notification.Name("com.apple.screensaver.didstop")
-    private static let defaults: ScreenSaverDefaults = {
-        let moduleName = Bundle(for: MatrixScreenSaverView.self).bundleIdentifier ?? "MatrixScreenSaver"
+    /// Keeps saver preferences shared even when this view is compiled into a different host.
+    static let defaults: ScreenSaverDefaults = {
+        let moduleName = "dev.patsch.MatrixScreenSaver"
         guard let defaults = ScreenSaverDefaults(forModuleWithName: moduleName) else {
             fatalError("Unable to create ScreenSaverDefaults for \(moduleName)")
         }
@@ -34,6 +35,36 @@ final class MatrixScreenSaverView: ScreenSaverView {
     ])
 
     private var animationActive = false
+    /// Whether the wallpaper host has suspended the framework timer while preserving renderer state.
+    private var wallpaperAnimationPaused = false
+
+    /// Enables coordinated scenes while the wallpaper app owns system suspension handling.
+    /// Set before starting animation; ordinary saver and preview hosts keep the default.
+    var isWallpaperHost = false
+
+    /// Lets the wallpaper's sole animation session continue while a saver covers its windows.
+    var rendersWallpaperWhileHidden = false
+
+    private var wallpaperFrameReader: WallpaperFrameReader?
+    private var sharedWallpaperImage: CGImage?
+    private var sharedFrameBuffer: SharedWallpaperFrame?
+    private var publishedWallpaperImage: CGImage?
+    /// Full-resolution scene base, reused while only terminal content changes.
+    private var wallpaperSceneBase: CGImage?
+    /// Backing-resolution scanlines avoid repainting hundreds of tall stripes each frame.
+    private var wallpaperScanLines: CGImage?
+    /// GPU resources are display-local and discarded with the cached visual layers.
+    private var wallpaperCompositor: SharedWallpaperCompositor?
+    /// Retains an unchanged cursor raster within the current layout and backing-scale epoch.
+    private var wallpaperCursor: (column: Int, color: TerminalColor, image: CGImage)?
+    /// Avoids retrying an unavailable or failed GPU until visual resources are rebuilt.
+    private var wallpaperGPUAttempted = false
+    /// Visual edits must publish even when the next simulation tick changes no cells.
+    private var wallpaperFrameNeedsRedraw = true
+    /// Keeps independent producer-loss playback independent across later option edits.
+    private var nativePlaybackSynchronized = false
+    /// Brief discovery precedes standalone startup so a warm wallpaper does not replay the intro.
+    private var awaitingWallpaperUntil: TimeInterval?
     private var terminalSize: TerminalSize?
     private var hasLoggedFirstDraw = false
     private var geometrySyncInProgress = false
@@ -184,12 +215,28 @@ final class MatrixScreenSaverView: ScreenSaverView {
             saverOptions = Self.loadSaverOptions()
         }
         shouldReloadOptionsOnStart = true
-        let skipSyncDelay = isPreview || !Self.isRunningInScreenSaverEngine
-        nativeRenderer.updateConfiguration(saverOptions.rendererConfiguration(isPreview: skipSyncDelay))
-        animationTimeInterval = nativeRenderer.preferredAnimationTimeInterval
+        wallpaperFrameReader = !isWallpaperHost && !isPreview && Self.isRunningInScreenSaverEngine ? WallpaperFrameReader() : nil
         NSLog("MatrixScreenSaver startAnimation bounds=%@", NSStringFromRect(bounds))
         appendDebugLog("[\(debugIdentifier)] startAnimation bounds=\(NSStringFromRect(bounds))")
         updateScreenSaverLifecycleObservation()
+        if let wallpaperFrameReader {
+            nativeRenderer.stop()
+            awaitingWallpaperUntil = ProcessInfo.processInfo.systemUptime + 1
+            _ = wallpaperFrameReader.frame(displayID: UInt32(displaySeed), pointSize: bounds.size)
+            needsDisplay = true
+        } else {
+            startNativeRenderer(synchronize: !isPreview && isWallpaperHost)
+        }
+    }
+
+    /// Starts coordinated standalone playback, or an immediate fallback after a lost producer.
+    private func startNativeRenderer(synchronize: Bool) {
+        nativePlaybackSynchronized = synchronize
+        let skipSyncDelay = !synchronize
+        nativeRenderer.overrideSceneStartTime = nil
+        nativeRenderer.overrideSceneContentStartTime = nil
+        nativeRenderer.updateConfiguration(saverOptions.rendererConfiguration(isPreview: skipSyncDelay))
+        animationTimeInterval = nativeRenderer.preferredAnimationTimeInterval
         updateLayout()
         nativeRenderer.seedOffset = displaySeed
 
@@ -210,9 +257,13 @@ final class MatrixScreenSaverView: ScreenSaverView {
     override func stopAnimation() {
         let wasActive = animationActive
         animationActive = false
+        wallpaperAnimationPaused = false
         pendingSync = false
         pendingRestart = false
         pendingSceneAdvance = false
+        wallpaperFrameReader = nil
+        sharedWallpaperImage = nil
+        awaitingWallpaperUntil = nil
         nativeRenderer.stop()
         ScreenSyncCoordinator.shared.unregister(ObjectIdentifier(self))
         releaseRenderingResources()
@@ -225,10 +276,12 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
     /// Advances the simulation and schedules redraws when the frame changed.
     override func animateOneFrame() {
-        guard animationActive else {
+        guard animationActive && !wallpaperAnimationPaused else {
             return
         }
-        guard isHostWindowVisibleForAnimation else {
+        guard isHostWindowVisibleForAnimation || (isWallpaperHost && rendersWallpaperWhileHidden) else {
+            // The wallpaper app owns resumption when desktop visibility changes.
+            guard !isWallpaperHost else { return }
             let now = Date.timeIntervalSinceReferenceDate
             if firstHiddenFrameTime == 0 {
                 firstHiddenFrameTime = now
@@ -238,6 +291,31 @@ final class MatrixScreenSaverView: ScreenSaverView {
             return
         }
         firstHiddenFrameTime = 0
+
+        if let wallpaperFrameReader {
+            if let frame = wallpaperFrameReader.frame(displayID: UInt32(displaySeed), pointSize: bounds.size) {
+                awaitingWallpaperUntil = nil
+                if sharedWallpaperImage == nil {
+                    nativeRenderer.stop()
+                    ScreenSyncCoordinator.shared.excludeFromSynchronization(ObjectIdentifier(self))
+                    pendingSync = false
+                    pendingRestart = false
+                    pendingSceneAdvance = false
+                }
+                if sharedWallpaperImage !== frame.image {
+                    sharedWallpaperImage = frame.image
+                    needsDisplay = true
+                }
+                return
+            } else if sharedWallpaperImage != nil {
+                sharedWallpaperImage = nil
+                startNativeRenderer(synchronize: false)
+            } else if let deadline = awaitingWallpaperUntil {
+                guard ProcessInfo.processInfo.systemUptime >= deadline else { return }
+                awaitingWallpaperUntil = nil
+                startNativeRenderer(synchronize: true)
+            }
+        }
 
         // While waiting for multi-screen sync (either initial startup or rain restart),
         // poll the coordinator each frame. Once a shared start time is available,
@@ -250,8 +328,12 @@ final class MatrixScreenSaverView: ScreenSaverView {
                 startTime = ScreenSyncCoordinator.shared.resolvedStartTime()
             }
             guard let time = startTime else {
+                sharedFrameBuffer?.refresh()
                 return
             }
+            nativeRenderer.overrideSceneContentStartTime = pendingRestart
+                ? ScreenSyncCoordinator.shared.restartContentTime
+                : ScreenSyncCoordinator.shared.startContentTime
             pendingSync = false
             if pendingRestart {
                 ScreenSyncCoordinator.shared.finishRestart(ObjectIdentifier(self))
@@ -268,6 +350,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
         // each frame. Once all displays are ready, advance to the next scene.
         if pendingSceneAdvance {
             guard let _ = ScreenSyncCoordinator.shared.resolvedPhaseAdvanceTime() else {
+                sharedFrameBuffer?.refresh()
                 return
             }
             pendingSceneAdvance = false
@@ -277,9 +360,11 @@ final class MatrixScreenSaverView: ScreenSaverView {
         }
 
         super.animateOneFrame()
-        if nativeRenderer.advance() {
+        let advanced = nativeRenderer.advance()
+        if advanced {
             needsDisplay = true
         }
+        publishWallpaperFrame(redraw: advanced)
 
         // After advance, check if the renderer has requested a restart
         if nativeRenderer.consumeRestartRequest() {
@@ -311,6 +396,19 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
     /// Paints the full terminal-window scene for the current frame.
     override func draw(_ dirtyRect: NSRect) {
+        if let image = sharedWallpaperImage ?? publishedWallpaperImage {
+            NSGraphicsContext.current?.cgContext.draw(image, in: bounds)
+            return
+        }
+        if awaitingWallpaperUntil != nil {
+            NSColor.black.setFill()
+            bounds.fill()
+            return
+        }
+        drawScene()
+    }
+
+    private func drawScene() {
         if !hasLoggedFirstDraw {
             hasLoggedFirstDraw = true
             NSLog("MatrixScreenSaver draw bounds=%@", NSStringFromRect(bounds))
@@ -388,11 +486,25 @@ final class MatrixScreenSaverView: ScreenSaverView {
         }
 
         markDisplayDirty()
+        if sharedFrameBuffer != nil { _ = shareWallpaperFrames() }
     }
 
     /// Marks the saver view as needing display on the next run-loop turn.
     private func markDisplayDirty() {
+        wallpaperSceneBase = nil
+        wallpaperScanLines = nil
+        wallpaperCompositor = nil
+        wallpaperCursor = nil
+        wallpaperGPUAttempted = false
+        wallpaperFrameNeedsRedraw = true
         needsDisplay = true
+    }
+
+    /// Rebuilds full-resolution publication resources after a display scale change.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        markDisplayDirty()
+        if sharedFrameBuffer != nil { _ = shareWallpaperFrames() }
     }
 
     /// Stops animation and frees resources once the host is no longer visible.
@@ -429,7 +541,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
                 guard let self, self.animationActive else {
                     return
                 }
-                if !window.isVisible {
+                if !window.isVisible && !self.isWallpaperHost {
                     self.handleHostDetachment(reason: "window-hidden")
                 }
             },
@@ -465,6 +577,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
     /// Starts observing distributed screen saver lifecycle notifications.
     private func updateScreenSaverLifecycleObservation() {
         stopObservingScreenSaverLifecycle()
+        guard !isWallpaperHost else { return }
 
         let center = DistributedNotificationCenter.default()
         screenSaverLifecycleObservers = [
@@ -505,6 +618,7 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
     /// Releases transient rendering caches and host observation state.
     private func releaseRenderingResources() {
+        stopSharingWallpaperFrames()
         stopObservingHostWindow()
         stopObservingScreenSaverLifecycle()
         releaseNativeFrameResources()
@@ -610,7 +724,14 @@ final class MatrixScreenSaverView: ScreenSaverView {
     }
 
     /// Paints the clipped terminal surface and its rendered frame buffer.
-    private func drawTerminal() {        let terminalPath = NSBezierPath(
+    private func drawTerminal() {
+        drawTerminalSurface()
+        drawTerminalContent()
+    }
+
+    /// Paints the unchanged black surface and rounded border beneath terminal content.
+    private func drawTerminalSurface() {
+        let terminalPath = NSBezierPath(
             roundedRect: terminalRect,
             xRadius: Self.terminalCornerRadius,
             yRadius: Self.terminalCornerRadius
@@ -621,18 +742,37 @@ final class MatrixScreenSaverView: ScreenSaverView {
         NSColor(calibratedWhite: 1.0, alpha: 0.03).setStroke()
         terminalPath.lineWidth = 1
         terminalPath.stroke()
+    }
+
+    /// Paints changing cells, cursor, and scanlines in their original compositing order.
+    private func drawTerminalContent() {
 
         guard let localTerminalSize = terminalSize else {
             return
         }
 
         NSGraphicsContext.saveGraphicsState()
-        terminalPath.addClip()
+        let terminalPath = NSBezierPath(roundedRect: terminalRect,
+            xRadius: Self.terminalCornerRadius, yRadius: Self.terminalCornerRadius)
+        if sharedFrameBuffer == nil { terminalPath.addClip() }
         drawNativeTerminal(localTerminalSize)
+        if sharedFrameBuffer != nil { terminalPath.addClip() }
 
-        // Draw the Neo scene cursor directly on top of the frame buffer.
-        // Covers all phases (startup delay, typing, pause, blank between lines).
-        // Direct draw bypasses the frame buffer pipeline and is guaranteed to appear.
+        drawNativeCursor()
+
+        NSGraphicsContext.restoreGraphicsState()
+
+        if saverOptions.scanLinesIntensity > 0 {
+            if let wallpaperScanLines {
+                NSGraphicsContext.current?.cgContext.draw(wallpaperScanLines, in: bounds)
+            } else {
+                drawScanLines()
+            }
+        }
+    }
+
+    /// Bypasses the glyph bitmap so the Neo cursor remains visible in every intro phase.
+    private func drawNativeCursor() {
         if let cursor = nativeRenderer.neoSceneCursor, cursor.visible {
             let palette = nativeRenderer.levelColors
             let level = min(max(palette.count / 2, 1), palette.count - 1)
@@ -643,11 +783,6 @@ final class MatrixScreenSaverView: ScreenSaverView {
             NSRect(x: x, y: y, width: cellWidth, height: lineHeight).fill()
         }
 
-        NSGraphicsContext.restoreGraphicsState()
-
-        if saverOptions.scanLinesIntensity > 0 {
-            drawScanLines()
-        }
     }
 
     /// Overlays 1 px dark stripes every 2 px for a CRT scanline effect.
@@ -672,19 +807,14 @@ final class MatrixScreenSaverView: ScreenSaverView {
         ctx.restoreGState()
     }
 
-    /// Repaints dirty terminal rows into the cached frame buffer and presents it.
-    private func drawNativeTerminal(_ localTerminalSize: TerminalSize) {
+    /// Repaints dirty rows once and snapshots the bitmap for CPU or GPU composition.
+    private func nativeTerminalImage(_ localTerminalSize: TerminalSize) -> CGImage? {
         let visibleRows = min(localTerminalSize.rows, nativeRenderer.rows)
         let visibleColumns = min(localTerminalSize.columns, nativeRenderer.columns)
         guard visibleRows > 0, visibleColumns > 0 else {
-            return
+            return nil
         }
-        guard
-            let context = NSGraphicsContext.current?.cgContext,
-            let frameContext = nativeFrameContext
-        else {
-            return
-        }
+        guard let frameContext = nativeFrameContext else { return nil }
 
         let hasDiffuseBackground = saverOptions.diffuseEnabled && !nativeDiffuseColorsByLevel.isEmpty
 
@@ -747,9 +877,13 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
         frameContext.flush()
         nativeRenderer.clearDirtyRows()
-        guard let image = frameContext.makeImage() else {
-            return
-        }
+        return frameContext.makeImage()
+    }
+
+    /// Presents the shared dirty-row raster through the unchanged native CPU reference path.
+    private func drawNativeTerminal(_ localTerminalSize: TerminalSize) {
+        guard let context = NSGraphicsContext.current?.cgContext,
+              let image = nativeTerminalImage(localTerminalSize) else { return }
 
         let drawRect = CGRect(
             x: terminalRect.minX,
@@ -760,7 +894,23 @@ final class MatrixScreenSaverView: ScreenSaverView {
         context.saveGState()
         context.interpolationQuality = .none
         context.setAlpha(1.0)
-        context.draw(image, in: drawRect)
+        if sharedFrameBuffer != nil {
+            // Only the edge bands need the expensive rounded coverage mask.
+            let radius = min(Self.terminalCornerRadius, terminalRect.height / 2)
+            context.saveGState()
+            context.clip(to: terminalRect.insetBy(dx: 0, dy: radius))
+            context.draw(image, in: drawRect)
+            context.restoreGState()
+            context.clip(to: [
+                CGRect(x: terminalRect.minX, y: terminalRect.minY, width: terminalRect.width, height: radius),
+                CGRect(x: terminalRect.minX, y: terminalRect.maxY - radius, width: terminalRect.width, height: radius),
+            ])
+            NSBezierPath(roundedRect: terminalRect, xRadius: Self.terminalCornerRadius,
+                         yRadius: Self.terminalCornerRadius).addClip()
+            context.draw(image, in: drawRect)
+        } else {
+            context.draw(image, in: drawRect)
+        }
         context.restoreGState()
     }
 
@@ -994,7 +1144,178 @@ final class MatrixScreenSaverView: ScreenSaverView {
 
     /// Applies options coming back from the configure sheet.
     func applySaverOptionsFromSheet(_ options: MatrixScreenSaverOptions) {
-        applySaverOptions(options, persist: true, restartAnimation: animationActive)
+        let restart = options.sanitized().requiresSceneRestart(comparedTo: saverOptions)
+        applySaverOptions(options, persist: true, restartAnimation: animationActive && restart)
+    }
+
+    /// Applies host-persisted rendering options without resetting a coordinated wallpaper session.
+    ///
+    /// - Parameter options: Visual options that do not require a grid or scene rebuild.
+    func applyWallpaperOptions(_ options: MatrixScreenSaverOptions) {
+        applySaverOptions(options, persist: false, restartAnimation: false)
+    }
+
+    /// Offers the current wallpaper frame without copying or restarting its simulation.
+    ///
+    /// - Returns: A private shared-memory file, or nil if this host cannot publish it.
+    func shareWallpaperFrames() -> URL? {
+        guard isWallpaperHost, animationActive else { return nil }
+        let scale = window?.backingScaleFactor ?? 1
+        if sharedFrameBuffer?.pointSize != bounds.size || sharedFrameBuffer?.displayID != UInt32(displaySeed) ||
+            sharedFrameBuffer?.pixelWidth != Int(ceil(bounds.width * scale)) ||
+            sharedFrameBuffer?.pixelHeight != Int(ceil(bounds.height * scale)) {
+            stopSharingWallpaperFrames()
+            sharedFrameBuffer = try? SharedWallpaperFrame(displayID: UInt32(displaySeed), pointSize: bounds.size, scale: scale)
+        }
+        publishWallpaperFrame(redraw: publishedWallpaperImage == nil)
+        return sharedFrameBuffer?.url
+    }
+
+    /// Unlinks producer storage while retaining the actual animation session.
+    func stopSharingWallpaperFrames() {
+        sharedFrameBuffer = nil
+        publishedWallpaperImage = nil
+        markDisplayDirty()
+    }
+
+    /// Builds rounded coverage at backing resolution without changing the CPU fallback geometry.
+    private func makeWallpaperCompositor(for buffer: SharedWallpaperFrame) -> SharedWallpaperCompositor? {
+        guard !showsWindowChrome, let base = wallpaperSceneBase,
+              let context = makeNativeBitmapContext(width: buffer.pixelWidth, height: buffer.pixelHeight) else { return nil }
+        context.scaleBy(x: CGFloat(buffer.pixelWidth) / bounds.width, y: CGFloat(buffer.pixelHeight) / bounds.height)
+        context.clear(bounds)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        NSColor.white.setFill()
+        NSBezierPath(roundedRect: terminalRect, xRadius: Self.terminalCornerRadius,
+                     yRadius: Self.terminalCornerRadius).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let mask = context.makeImage() else { return nil }
+        return SharedWallpaperCompositor(base: base, mask: mask, scanLines: wallpaperScanLines, terminalSize: nativeFrameSize)
+    }
+
+    /// Rasterizes only the cursor layer; clipping and final layering remain on the GPU.
+    private func wallpaperCursorImage(for buffer: SharedWallpaperFrame) -> CGImage? {
+        guard let cursor = nativeRenderer.neoSceneCursor, cursor.visible else { return nil }
+        let palette = nativeRenderer.levelColors
+        let color = palette[min(max(palette.count / 2, 1), palette.count - 1)]
+        if let cached = wallpaperCursor, cached.column == cursor.column, cached.color == color { return cached.image }
+        guard let context = makeNativeBitmapContext(width: buffer.pixelWidth, height: buffer.pixelHeight) else { return nil }
+        context.scaleBy(x: CGFloat(buffer.pixelWidth) / bounds.width, y: CGFloat(buffer.pixelHeight) / bounds.height)
+        context.clear(bounds)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        drawNativeCursor()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let image = context.makeImage() else { return nil }
+        wallpaperCursor = (cursor.column, color, image)
+        return image
+    }
+
+    /// Renders the full canvas once at backing resolution only while a consumer needs it.
+    private func publishWallpaperFrame(redraw: Bool) {
+        guard let buffer = sharedFrameBuffer else { return }
+        guard redraw || wallpaperFrameNeedsRedraw || publishedWallpaperImage == nil else { buffer.refresh(); return }
+        if wallpaperSceneBase == nil,
+           let context = makeNativeBitmapContext(width: buffer.pixelWidth, height: buffer.pixelHeight) {
+            context.scaleBy(x: CGFloat(buffer.pixelWidth) / bounds.width, y: CGFloat(buffer.pixelHeight) / bounds.height)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            drawBackground()
+            if showsWindowChrome { drawWindow() }
+            drawTerminalSurface()
+            NSGraphicsContext.restoreGraphicsState()
+            wallpaperSceneBase = context.makeImage()
+            if saverOptions.scanLinesIntensity > 0 {
+                context.clear(bounds)
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+                drawScanLines()
+                NSGraphicsContext.restoreGraphicsState()
+                wallpaperScanLines = context.makeImage()
+            }
+        }
+        var changedBands: [CGRect] = []
+        if !wallpaperFrameNeedsRedraw, publishedWallpaperImage != nil, wallpaperSceneBase != nil,
+           let terminalSize, nativeFrameSize.height > 0 {
+            let rowHeight = lineHeight * terminalRect.height / nativeFrameSize.height
+            let scale = CGFloat(buffer.pixelHeight) / bounds.height
+            for row in 0..<min(terminalSize.rows, nativeRenderer.rows) where nativeRenderer.isRowDirty(row) {
+                let minY = max(0, floor((terminalRect.maxY - CGFloat(row + 1) * rowHeight) * scale) - 1) / scale
+                let maxY = min(CGFloat(buffer.pixelHeight), ceil((terminalRect.maxY - CGFloat(row) * rowHeight) * scale) + 1) / scale
+                let band = CGRect(x: 0, y: minY, width: bounds.width, height: maxY - minY)
+                if let last = changedBands.last, last.intersects(band) {
+                    changedBands[changedBands.count - 1] = last.union(band)
+                } else {
+                    changedBands.append(band)
+                }
+            }
+        }
+        if !wallpaperGPUAttempted {
+            wallpaperGPUAttempted = true
+            wallpaperCompositor = makeWallpaperCompositor(for: buffer)
+        }
+        if let compositor = wallpaperCompositor, let terminalSize,
+           let terminal = nativeTerminalImage(terminalSize) {
+            let cursorState = nativeRenderer.neoSceneCursor
+            if cursorState == nil { wallpaperCursor = nil }
+            let hasCursor = cursorState?.visible == true
+            let cursor = hasCursor ? wallpaperCursorImage(for: buffer) : nil
+            if !hasCursor || cursor != nil {
+                do {
+                    if let image = try compositor.publish(terminal: terminal, cursor: cursor, to: buffer) {
+                        publishedWallpaperImage = image
+                        wallpaperFrameNeedsRedraw = false
+                        needsDisplay = true
+                    }
+                    return
+                } catch {
+                    NSLog("MatrixScreenSaver GPU composition failed; retaining native CPU fallback: %@", String(describing: error))
+                }
+            }
+            wallpaperCompositor = nil
+        }
+        if let image = buffer.publish({ context in
+            context.scaleBy(x: CGFloat(buffer.pixelWidth) / bounds.width, y: CGFloat(buffer.pixelHeight) / bounds.height)
+            if !changedBands.isEmpty { context.clip(to: changedBands) }
+            if let base = wallpaperSceneBase {
+                context.saveGState()
+                context.setBlendMode(.copy)
+                context.interpolationQuality = .none
+                context.draw(base, in: bounds)
+                context.restoreGState()
+            }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            if wallpaperSceneBase != nil {
+                drawTerminalContent()
+                if showsWindowChrome { drawTitlebar() }
+            } else {
+                drawScene()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }) {
+            publishedWallpaperImage = image
+            wallpaperFrameNeedsRedraw = false
+            needsDisplay = true
+        }
+    }
+
+    /// Stops framework frame scheduling without releasing cells or scene-barrier membership.
+    func pauseWallpaperAnimation() {
+        guard isWallpaperHost, animationActive, !wallpaperAnimationPaused else { return }
+        wallpaperAnimationPaused = true
+        super.stopAnimation()
+    }
+
+    /// Resumes the preserved wallpaper scene after excluding a shared suspension interval.
+    ///
+    /// - Parameter duration: Wall-clock pause duration, identical for every display.
+    func resumeWallpaperAnimation(after duration: TimeInterval) {
+        guard wallpaperAnimationPaused else { return }
+        nativeRenderer.shiftTimeline(by: duration)
+        wallpaperAnimationPaused = false
+        super.startAnimation()
     }
 
     /// Applies options to the live saver and optionally persists or restarts it.
@@ -1011,7 +1332,9 @@ final class MatrixScreenSaverView: ScreenSaverView {
             stopAnimation()
         }
 
-        nativeRenderer.updateConfiguration(sanitizedOptions.rendererConfiguration())
+        let skipSyncDelay = animationActive ? !nativePlaybackSynchronized
+            : isPreview || (!isWallpaperHost && !Self.isRunningInScreenSaverEngine)
+        nativeRenderer.updateConfiguration(sanitizedOptions.rendererConfiguration(isPreview: skipSyncDelay))
         animationTimeInterval = nativeRenderer.preferredAnimationTimeInterval
 
         updateLayout()
@@ -1019,19 +1342,21 @@ final class MatrixScreenSaverView: ScreenSaverView {
         if restartAnimation {
             startAnimation()
         } else {
-            markDisplayDirty()
+            needsDisplay = true
         }
     }
 
     /// Loads persisted options from ScreenSaverDefaults.
-    private static func loadSaverOptions() -> MatrixScreenSaverOptions {
+    static func loadSaverOptions() -> MatrixScreenSaverOptions {
         defaults.synchronize()
         return MatrixScreenSaverOptions.load(from: defaults)
     }
 
     /// Creates a fresh configure-sheet controller for each presentation.
     private func makeOptionsSheetController() -> MatrixScreenSaverOptionsSheetController {
-        let controller = MatrixScreenSaverOptionsSheetController(owner: self)
+        let controller = MatrixScreenSaverOptionsSheetController { [weak self] options in
+            self?.applySaverOptionsFromSheet(options)
+        }
         controller.onClose = { [weak self, weak controller] in
             guard let self, let controller, self.optionsSheetController === controller else {
                 return

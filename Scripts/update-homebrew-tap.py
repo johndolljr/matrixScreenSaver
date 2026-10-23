@@ -2,6 +2,7 @@
 """Publish verified release metadata to the tap's default branch, failing closed."""
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "Homebrew/Casks/matrix-screen-saver.rb"
+LEGACY_STRUCTURE_SHA256 = "5887ff0f5de0edcb895128458af2b519c4243ebe67b6de3a78374c1934c24e59"
 
 
 def cask_metadata(content):
@@ -65,7 +67,8 @@ def update(api, target, version, content):
         raise ValueError("Tap cask is missing or not a regular file; inspect it before publication")
     current = base64.b64decode(existing["content"]).decode()
     previous, previous_structure = cask_metadata(current)
-    if previous_structure != structure:
+    if (previous_structure != structure
+            and hashlib.sha256(previous_structure.encode()).hexdigest() != LEGACY_STRUCTURE_SHA256):
         raise ValueError("Tap cask has unrelated edits; review the manual handoff (no overwrite)")
     if tuple(map(int, previous[0].split("."))) > tuple(map(int, version.split("."))):
         return f"Tap already has newer version {previous[0]}; skipped {version}"
@@ -98,7 +101,8 @@ def main():
         expected_url = ("https://github.com/patrickschaper/matrixScreenSaver/releases/download/"
                         f"{manifest['version']}/{manifest['version']}.zip")
         if (manifest["asset_url"] != expected_url or metadata[1] != manifest["sha256"]
-                or {"sequoia": "15.0", "tahoe": "26.0"}[metadata[2]] != manifest["cask_macos_floor"]):
+                or {"sequoia": "15.0", "tahoe": "26.0"}[metadata[2]] != manifest["cask_macos_floor"]
+                or manifest.get("bundle_identifiers") != ["dev.patsch.MatrixScreenSaver", "dev.patsch.MatrixWallpaper"]):
             raise ValueError("Cask does not match the verified handoff manifest")
         print(update(GitHubAPI(token), args.target, manifest["version"], content))
     except (ValueError, RuntimeError, OSError, KeyError) as error:

@@ -4,7 +4,10 @@ The public tap is [patrickschaper/homebrew-tap](https://github.com/patrickschape
 `Casks/matrix-screen-saver.rb` here is the source payload for the same path in
 that repository. Users add it with `brew tap patrickschaper/tap`.
 
-The payload uses Homebrew's native `screen_saver` artifact, not the local installer.
+The next release payload uses Homebrew's native `screen_saver` and `app` artifacts,
+not the local installers, to manage `MatrixScreenSaver.saver` and `MatrixWallpaper.app`
+together. The live tap gains this behavior only after a new dual-bundle release and
+tap update; immutable older releases remain saver-only.
 It retains the `dev.patsch.MatrixScreenSaver` preferences domain and has no zap
 or preference-cleanup hook. Its published binary requires Apple Silicon (ARM64)
 and macOS 15 (Sequoia) or newer.
@@ -28,17 +31,25 @@ The fully qualified install trusts this cask, not the entire tap. Explicit
 `brew trust --cask` also permits subsequent installs using the short name.
 
 **Security:** preflight removes quarantine recursively only from the
-checksum-verified staged `MatrixScreenSaver.saver`, before Homebrew moves it.
-This bypasses Gatekeeper quarantine checks; it does not make the bundle notarized
+checksum-verified staged `MatrixScreenSaver.saver` and `MatrixWallpaper.app`, before
+Homebrew moves them. This bypasses Gatekeeper quarantine checks; it does not make either bundle notarized
 or Apple-approved. Install only if you trust the release publisher. The cask
 prints this disclosure before invoking `/usr/bin/xattr`; failure aborts installation.
 
 After installation, open **System Settings > Wallpaper > Screen Saver** and
 select **MatrixScreenSaver** manually. Modern Homebrew's sandbox blocks opening
 Settings, so automatic opening was intentionally removed. The cask never selects
-the saver or opens a browser. Successful install, upgrade, and reinstall print:
+the saver, launches the wallpaper on a fresh install, enables login startup, or opens
+a browser. Open **MatrixWallpaper** from Homebrew's configured `appdir` (normally
+`/Applications`) yourself, then use its single **Launch at Login** checkbox if wanted.
+Homebrew may reopen an already-running app following an upgrade. Successful install,
+upgrade, and reinstall print:
 
 > There is no spoon. There is coffee: https://www.buymeacoffee.com/yesman82
+
+They also print both the screen-saver selection instructions and the actual
+installed app path to open for Matrix Wallpaper, including custom `appdir` values,
+with a reminder that Launch at Login is optional.
 
 An existing manual bundle is not silently replaced. The native artifact rejects
 an unforced conflict; opt in to replacement while retaining saved options with:
@@ -47,7 +58,7 @@ an unforced conflict; opt in to replacement while retaining saved options with:
 brew install --cask --force patrickschaper/tap/matrix-screen-saver
 ```
 
-The conditional guidance honors Homebrew's configured `screen_saverdir`.
+The conditional guidance honors Homebrew's configured `screen_saverdir` and `appdir`.
 Homebrew 7.0.7's `if_path_exists` checks `exist?`, not `symlink?`: a dangling
 symlink is still rejected by the native artifact, but does not print the custom
 migration message. Use the same explicit `--force` command to replace it.
@@ -65,34 +76,48 @@ Upgrades and reinstalls remain native Homebrew operations. An upgrade may print
 the existing-target guidance because Homebrew can leave an empty target directory
 during replacement; no prior-receipt snapshot or initial-install-only behavior
 is needed. Custom destinations are honored, and other saver copies are not removed.
+The native app and screen-saver artifacts are both installed and removed by the
+same cask. Uninstall requests that `dev.patsch.MatrixWallpaper` quit and asks
+Homebrew to remove its login items. Homebrew skips login-item cleanup when an
+upgrade/reinstall successor exists; no unconditional unregister script runs.
+This cleanup is best effort, not a guarantee of immediate `SMAppService` entry
+removal. macOS may retain deleted entries until its maintenance runs. Disable
+**Launch at Login** before uninstall if you want the app to unregister explicitly.
 Migration, upgrade, reinstall, and ordinary uninstall retain the
 `dev.patsch.MatrixScreenSaver` options domain. There is no zap hook or preference
-rewrite. Uninstall prints neither coffee nor installation guidance.
+rewrite. Uninstall prints neither coffee nor installation guidance. Manual copies
+outside Homebrew's configured destinations are not removed. The local wallpaper
+installer defaults to `~/Applications`; it can coexist with Homebrew's default
+`/Applications` copy. Quit the manual copy before migrating, or select
+`--appdir=~/Applications` and explicitly use `--force` to replace it.
 
 ## Release handoff
 
 After publication, the Release workflow downloads the **existing published**
-versioned zip, including on reruns. It checks the asset digest, bundle identity
-and version, archive layout, thin ARM64 Mach-O bundle, and minimum macOS version.
+versioned zip, including on reruns. Release preparation and publication build both
+products and the archive contains both bundle roots. Validation checks the asset
+digest, both bundle identities and matching versions, archive layout, thin ARM64
+Mach-O bundle/executable types, and the greater of their minimum macOS versions.
 It uploads `homebrew-handoff-VERSION-ATTEMPT`, containing `Casks/matrix-screen-saver.rb`
-and `manifest.json` with version, URL, SHA-256, architecture, OS floor, and provenance.
+and `manifest.json` with version, URL, SHA-256, architecture, OS floor, both bundle
+identifiers, and provenance.
 The workflow then automatically commits matching release metadata to the tap's
 default branch when the target variable and dedicated token are configured.
 Each workflow attempt gets a separate artifact so reruns preserve earlier handoffs
 without upload-name conflicts. The artifacts remain available for manual recovery.
 
-Offline validation:
+Offline validation of a newly published dual-bundle release:
 
 ```bash
 python3 -B Scripts/render-homebrew-release.py \
-  --version 0.2.0 --archive /path/to/0.2.0.zip \
-  --asset-url https://github.com/patrickschaper/matrixScreenSaver/releases/download/0.2.0/0.2.0.zip \
-  --digest sha256:7a60c8ec2855a2df4cb008da7f79ea9e8526385897e3048bb53bb42421e07acd \
-  --provenance manual-release-download --output /path/to/handoff
+  --version VERSION --provenance manual-release-download --output /path/to/handoff
 ```
 
-Omit `--archive`, `--asset-url`, and `--digest` to retrieve the release through
-`gh`; the renderer never builds a replacement archive. A new unsupported OS floor
+Replace `VERSION` with the actual published version. To use an existing local
+download, also provide `--archive`, its immutable `--asset-url`, and its
+`--digest sha256:...`. Otherwise the renderer retrieves the release through `gh`;
+it never builds or replaces a published archive. Saver-only old archives fail
+validation rather than generating a cask with a missing app. A new unsupported OS floor
 or architecture fails closed until the compatibility policy is updated.
 
 ## Automatic tap updates (token pending)
@@ -116,7 +141,10 @@ after validating the published asset and uploading the handoff. It writes only
 `Casks/matrix-screen-saver.rb` on the tap's default branch; no tap PR or merge is
 required. This replaces the previous optional, human-merged tap PR behavior.
 Only version, SHA-256, and minimum macOS metadata may differ from the source
-template. Unrelated cask edits or a missing cask fail closed for manual review.
+template. For the first dual-bundle release, the exact frozen saver-only predecessor
+is also accepted for a strictly newer version, using its normalized structure hash.
+This one reviewed transition does not allow arbitrary structural edits. Unrelated
+cask edits or a missing cask fail closed for manual review.
 Identical reruns make no commit, older versions are skipped, and conflicting
 same-version metadata is rejected. Each write includes the current file SHA;
 concurrent changes cause a failure, never a blind retry or forced overwrite.
@@ -147,6 +175,7 @@ ruby -c Homebrew/Casks/matrix-screen-saver.rb
 bash -n Tests/Homebrew/integration_lifecycle.sh
 ./tests.sh
 ./build.sh
+./build-wallpaper.sh
 ```
 
 `.github/workflows/homebrew-tests.yml` runs offline tests without publishing secrets,
@@ -158,16 +187,20 @@ authorization for a disposable environment first, then run:
 bash Tests/Homebrew/integration_lifecycle.sh
 ```
 
-The test requires an ARM64 macOS host and Homebrew 7.0.7. It redirects the native
+The test requires an ARM64 macOS host and Homebrew 7.0.7 or newer. CI pins 7.0.7
+as the compatibility baseline. It redirects the native
 destination, all artifact directories, Caskroom, cache, logs, and fixture tap into
 one temporary directory. It uses real installers, upgrade orchestration, downloads,
-native moves, sandboxed install steps, echo stdout, and quarantine operations.
+native moves for both bundles, sandboxed install steps, echo stdout, and quarantine operations.
+Only the operating-system process/login-item command boundary is substituted, so
+the fixture never quits a real app or changes real login settings. Homebrew's
+actual uninstall dispatch and successor handling still run.
 There is no Settings-launch mock: the cask contains no Settings-launch command.
 A separate
 sentinel outside the artifact destination verifies preference retention; it does
 not access the actual defaults domain. HOME alone is not used as isolation.
 
-Native integration covers install, conflict failure, forced migration, upgrade,
+Native integration covers saver-only migration, dual install, conflict failure, forced migration, upgrade,
 reinstall, uninstall, quarantine removal, broken-symlink conflict/force semantics,
 and developer-mode acceptance without legacy warnings on definition load or
 uninstall. Run workflow lint (for example `actionlint`) separately; never conceal

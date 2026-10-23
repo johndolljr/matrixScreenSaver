@@ -39,6 +39,9 @@ swiftc \
   "$SOURCE_DIR/MatrixRendererLimits.swift" \
   "$SOURCE_DIR/NativeMatrixRenderer.swift" \
   "$SOURCE_DIR/ScreenSyncCoordinator.swift" \
+  "$SOURCE_DIR/SharedWallpaperFrame.swift" \
+  "$SOURCE_DIR/WallpaperFrameReader.swift" \
+  "$SOURCE_DIR/SharedWallpaperCompositor.swift" \
   "$SOURCE_DIR/MatrixScreenSaverView.swift"
 
 cp "$INPUT_RESOURCES_DIR/Info.plist" "$CONTENTS_DIR/Info.plist"

@@ -131,8 +131,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          printf '%s\n' "${{ steps.version.outputs.next }}" > VERSION
           rm -rf build
           ./build.sh
+          ./build-wallpaper.sh
+          codesign --verify --deep --strict "build/MatrixScreenSaver.saver"
+          codesign --verify --deep --strict "build/MatrixWallpaper.app"
 
       - name: Update CHANGELOG
         id: changelog
@@ -195,7 +199,6 @@ jobs:
           version="${{ steps.version.outputs.next }}"
           branch="${{ steps.version.outputs.branch }}"
 
-          printf '%s\n' "${version}" > VERSION
           git add VERSION CHANGELOG.md
           git commit -m "chore(release): ${version}" -m "- bump VERSION to ${version}" -m "- update CHANGELOG.md"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -214,7 +217,7 @@ jobs:
           changelog_section="$(awk "/^## \[${version}\]/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md)"
 
           pr_body="$(
-            printf '## What'\''s changing\n\n%s\n\n## Validation\n- `./build.sh`\n' "${changelog_section}"
+            printf '## What'\''s changing\n\n%s\n\n## Validation\n- `./build.sh`\n- `./build-wallpaper.sh`\n- Strict codesign verification of both bundles\n' "${changelog_section}"
           )"
 
           # Close any existing release PR so the new one starts with a clean
@@ -406,13 +409,16 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build screen saver
+      - name: Build screen saver and wallpaper app
         if: steps.release.outputs.exists != 'true'
         shell: bash
         run: |
           set -euo pipefail
           rm -rf build
           ./build.sh
+          ./build-wallpaper.sh
+          codesign --verify --deep --strict "build/MatrixScreenSaver.saver"
+          codesign --verify --deep --strict "build/MatrixWallpaper.app"
 
       - name: Stage release files
         if: steps.release.outputs.exists != 'true'
@@ -427,6 +433,7 @@ jobs:
           rm -rf "${release_dir}"
           mkdir -p "${release_dir}"
           ditto "build/MatrixScreenSaver.saver" "${release_dir}/MatrixScreenSaver.saver"
+          ditto "build/MatrixWallpaper.app" "${release_dir}/MatrixWallpaper.app"
 
           echo "dir=${release_dir}" >> "$GITHUB_OUTPUT"
 

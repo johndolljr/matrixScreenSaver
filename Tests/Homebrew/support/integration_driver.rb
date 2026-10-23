@@ -8,7 +8,7 @@ require "stringio"
 ENV["HOMEBREW_DEVELOPER"] = "1"
 ROOT = Pathname(ARGV.fetch(0)).realpath
 raise "Unsafe test root" unless ROOT.basename.to_s.start_with?("matrix-homebrew-integration.")
-raise "Homebrew 7.0.7 is required for this compatibility test" unless HOMEBREW_VERSION.start_with?("7.0.7")
+raise "Homebrew 7.0.7 or newer is required for this compatibility test" if Version.new(HOMEBREW_VERSION) < Version.new("7.0.7")
 raise "Cache escaped isolation" unless HOMEBREW_CACHE.realpath.to_s.start_with?("#{ROOT}/")
 raise "Native checks require Homebrew's sandbox" unless Sandbox.use_for?("running cask artifact operations")
 
@@ -19,25 +19,46 @@ TAP.instance_variable_set(:@path, ROOT/"tap")
 (TAP.path/"Casks").mkpath
 CONFIG = Cask::Config.new(explicit: Cask::Config::DEFAULT_DIRS.keys.to_h { |key| [key, ROOT/key.to_s] })
 TARGET = CONFIG.screen_saverdir/"MatrixScreenSaver.saver"
+APP_TARGET = CONFIG.appdir/"MatrixWallpaper.app"
+TARGETS = [TARGET, APP_TARGET].freeze
 PREFS = ROOT/"preferences-sentinel"
 PREFS.write("saved options\x00")
 COFFEE = "There is no spoon. There is coffee: https://www.buymeacoffee.com/yesman82".freeze
 check_source = Pathname("Homebrew/Casks/matrix-screen-saver.rb").read
 raise "Cask must not launch Settings" if check_source.include?("/usr/bin/open")
 
+# Keep native directive dispatch and successor checks, but never cross the
+# AppleScript boundary into the user's running app or real login items.
+OSASCRIPT_CALLS = []
+FAILED_STATUS = SystemCommand.run("/usr/bin/false").status
+module IsolatedUninstallAutomation
+  def system_command(executable, **options)
+    return super unless File.basename(executable.to_s) == "osascript"
+
+    raise "Unexpected automation artifact" unless cask.token == "matrix-screen-saver"
+
+    OSASCRIPT_CALLS << options.fetch(:args)
+    # Not running; login removal fails to exercise native best-effort handling.
+    SystemCommand::Result.new([executable.to_s, *options.fetch(:args)], [], FAILED_STATUS, secrets: [])
+  end
+end
+Cask::Artifact::AbstractUninstall.prepend(IsolatedUninstallAutomation)
+
 # Observe real stage ordering and plant real quarantine on fixture bytes before
-# preflight. No native filesystem/download/artifact/quarantine operation is mocked.
+# preflight. No native filesystem/download/quarantine operation is mocked.
 module StageObservation
   def stage
     super
     raise "Receipt missing after real stage" unless cask.installed?
 
-    saver = cask.artifacts.grep(Cask::Artifact::ScreenSaver).fetch(0)
-    raise "Source or target escaped isolation" unless [saver.source, saver.target].all? { |p| p.to_s.start_with?("#{ROOT}/") }
+    cask.artifacts.select { |a| a.is_a?(Cask::Artifact::ScreenSaver) || a.is_a?(Cask::Artifact::App) }.each do |artifact|
+      raise "Source or target escaped isolation" unless [artifact.source, artifact.target].all? { |p| p.to_s.start_with?("#{ROOT}/") }
 
-    SystemCommand.run!("/usr/bin/xattr", args: ["-w", "com.apple.quarantine", "0081;00000000;fixture;", saver.source.to_s])
-    SystemCommand.run!("/usr/bin/xattr", args: ["-w", "com.apple.quarantine", "0081;00000000;fixture;",
-                                             (saver.source/"Contents/MacOS/MatrixScreenSaver").to_s])
+      executable = artifact.source.extname == ".app" ? "MatrixWallpaper" : "MatrixScreenSaver"
+      [artifact.source, artifact.source/"Contents/MacOS"/executable].each do |path|
+        SystemCommand.run!("/usr/bin/xattr", args: ["-w", "com.apple.quarantine", "0081;00000000;fixture;", path.to_s])
+      end
+    end
   end
 end
 Cask::Installer.prepend(StageObservation)
@@ -56,8 +77,8 @@ ensure
   $stdout, $stderr = old_out, old_err
 end
 
-def definition(version)
-  content = Pathname("Homebrew/Casks/matrix-screen-saver.rb").read
+def definition(version, legacy: false)
+  content = Pathname(legacy ? "Tests/Homebrew/fixtures/legacy-screen-saver.rb" : "Homebrew/Casks/matrix-screen-saver.rb").read
   content.sub!('version "0.2.0"', "version \"#{version}\"")
   content.sub!(/sha256 "[0-9a-f]+"/, "sha256 \"#{Digest::SHA256.file(ROOT/"#{version}.zip").hexdigest}\"")
   content.sub!(/^  url .+$/, "  url \"file://#{ROOT}/#{version}.zip\"")
@@ -69,22 +90,31 @@ def definition(version)
   loaded
 end
 
-def verify_target(version)
-  info = SystemCommand.run!("/usr/libexec/PlistBuddy",
-                            args: ["-c", "Print :CFBundleShortVersionString", (TARGET/"Contents/Info.plist").to_s])
-  check(info.stdout.strip == version, "Native target has wrong version")
-  [TARGET, TARGET/"Contents/MacOS/MatrixScreenSaver"].each do |path|
-    result = SystemCommand.run("/usr/bin/xattr", args: ["-p", "com.apple.quarantine", path.to_s], print_stderr: false)
-    check(!result.success?, "Quarantine survived preflight")
+def verify_target(version, targets: TARGETS)
+  targets.each do |target|
+    info = SystemCommand.run!("/usr/libexec/PlistBuddy",
+                              args: ["-c", "Print :CFBundleShortVersionString", (target/"Contents/Info.plist").to_s])
+    check(info.stdout.strip == version, "Native target has wrong version")
+    executable = target.extname == ".app" ? "MatrixWallpaper" : "MatrixScreenSaver"
+    [target, target/"Contents/MacOS"/executable].each do |path|
+      result = SystemCommand.run("/usr/bin/xattr", args: ["-p", "com.apple.quarantine", path.to_s], print_stderr: false)
+      check(!result.success?, "Quarantine survived preflight")
+    end
   end
   check(PREFS.read == "saved options\x00", "Preferences changed")
 end
 
 def uninstall(cask)
+  OSASCRIPT_CALLS.clear
   output = capture { Cask::Installer.new(cask).uninstall }
   check(!output.match?(/deprecated/i), "Uninstall emitted deprecation warnings")
   check(!output.include?(COFFEE), "Uninstall printed install success")
-  check(!TARGET.exist? && !TARGET.symlink?, "Native uninstall left target")
+  check(TARGETS.none? { |target| target.exist? || target.symlink? }, "Native uninstall left target")
+  check(OSASCRIPT_CALLS.any? { |args| args.last == "dev.patsch.MatrixWallpaper" }, "Native quit did not probe running app")
+  login_calls = OSASCRIPT_CALLS.select { |args| args.join.include?("delete every login item") }
+  check(login_calls.any? { |args| args.last.include?(APP_TARGET.to_s.inspect) }, "Native path login removal not attempted")
+  check(login_calls.any? { |args| args.last.include?("Matrix Wallpaper".inspect) }, "Native named login removal not attempted")
+  check(output.include?("failed"), "Failed login cleanup did not warn")
   check(PREFS.read == "saved options\x00", "Uninstall changed preferences")
 end
 
@@ -106,12 +136,53 @@ output = capture { Cask::Installer.new(fresh).install }
 puts output
 check(output.scan(COFFEE).length == 1, "Fresh coffee output count wrong")
 check(output.include?("Open System Settings > Wallpaper > Screen Saver"), "Manual selection guidance missing")
+check(output.include?("Open #{APP_TARGET} to start Matrix Wallpaper."), "Wallpaper launch guidance missing configured app path")
 check(!output.match?(/deprecated/i), "Install emitted deprecation warnings")
 verify_target("1.2.3")
+check(OSASCRIPT_CALLS.empty?, "Install attempted startup or cleanup")
 puts "PASS AE1 sandboxed native fresh install and actual coffee stdout"
+
+uninstall(fresh)
+OSASCRIPT_CALLS.clear
+legacy = definition("1.2.2", legacy: true)
+capture { Cask::Installer.new(legacy).install }
+verify_target("1.2.2", targets: [TARGET])
+check(!APP_TARGET.exist?, "Legacy fixture installed an app")
+APP_TARGET.mkpath
+(APP_TARGET/"manual-executable").write("manual sentinel")
+conflicting = definition("1.2.3")
+failed = false
+output = capture do
+  begin
+    Cask::Upgrade.upgrade_cask(legacy, conflicting, binaries: true, force: false,
+                             require_sha: true, quit: false, skip_cask_deps: false, verbose: false,
+                             download_queue: Homebrew::DownloadQueue.default,
+                             new_cask_installer: Cask::Installer.new(conflicting, upgrade: true))
+  rescue Cask::CaskError
+    failed = true
+  end
+end
+check(failed, "Legacy upgrade unexpectedly replaced a manual app")
+check((APP_TARGET/"manual-executable").read == "manual sentinel", "Legacy upgrade changed manual app")
+verify_target("1.2.2", targets: [TARGET])
+check(output.include?("Reverting upgrade"), "Failed legacy upgrade did not report rollback")
+FileUtils.remove_entry(APP_TARGET)
+puts "PASS native legacy upgrade conflict preserves manual app and restores saver"
+fresh = definition("1.2.3")
+output = capture do
+  Cask::Upgrade.upgrade_cask(legacy, fresh, binaries: true, force: false,
+                           require_sha: true, quit: false, skip_cask_deps: false, verbose: false,
+                           download_queue: Homebrew::DownloadQueue.default,
+                           new_cask_installer: Cask::Installer.new(fresh, upgrade: true))
+end
+verify_target("1.2.3")
+check(output.scan(COFFEE).length == 1, "Legacy migration coffee output count wrong")
+check(OSASCRIPT_CALLS.empty?, "Legacy migration attempted automation")
+puts "PASS native legacy saver-only to dual-bundle migration"
 
 # AE4: successor evaluates while prior metadata exists, before native upgrade.
 successor = definition("1.2.4")
+OSASCRIPT_CALLS.clear
 check(successor.installed?, "Successor did not observe prior metadata")
 output = capture do
   Cask::Upgrade.upgrade_cask(fresh, successor, binaries: true, force: false,
@@ -122,42 +193,49 @@ end
 verify_target("1.2.4")
 check(output.scan(COFFEE).length == 1, "Upgrade coffee output count wrong")
 check(!output.match?(/deprecated/i), "Upgrade emitted deprecation warnings")
+check(OSASCRIPT_CALLS.none? { |args| args.join.include?("delete every login item") }, "Upgrade removed login items")
 puts "PASS AE4 real two-version native upgrade"
 
 reinstall = definition("1.2.4")
+OSASCRIPT_CALLS.clear
 output = capture { Cask::Installer.new(reinstall, reinstall: true).install }
+check(OSASCRIPT_CALLS.none? { |args| args.join.include?("delete every login item") }, "Reinstall removed login items")
 check(output.scan(COFFEE).length == 1, "Reinstall coffee output count wrong")
 verify_target("1.2.4")
 uninstall(reinstall)
 puts "PASS AE5 native uninstall and managed reinstall preference retention"
 
 # AE2/AE3: existing manual bundle survives native rejection, then explicit force replaces.
-TARGET.mkpath
-(TARGET/"manual-executable").write("manual sentinel")
-SystemCommand.run!("/usr/bin/xattr", args: ["-w", "com.apple.quarantine", "manual-quarantine", TARGET.to_s])
-manual = definition("1.2.3")
-failed = false
-output = capture do
-  begin
-    Cask::Installer.new(manual).install
-  rescue Cask::CaskError => error
-    failed = true
-    check(error.message.include?("already"), "Unexpected native conflict: #{error}")
+TARGETS.each do |target|
+  target.mkpath
+  (target/"manual-executable").write("manual sentinel")
+  SystemCommand.run!("/usr/bin/xattr", args: ["-w", "com.apple.quarantine", "manual-quarantine", target.to_s])
+  manual = definition("1.2.3")
+  failed = false
+  output = capture do
+    begin
+      Cask::Installer.new(manual).install
+    rescue Cask::CaskError => error
+      failed = true
+      check(error.message.include?("already"), "Unexpected native conflict: #{error}")
+    end
   end
+  check(failed, "Native artifact did not reject manual conflict")
+  check((target/"manual-executable").read == "manual sentinel", "Manual bundle changed")
+  check((TARGETS - [target]).none?(&:exist?), "Native rollback left the other bundle installed")
+  quarantine = SystemCommand.run!("/usr/bin/xattr", args: ["-p", "com.apple.quarantine", target.to_s])
+  check(quarantine.stdout.strip == "manual-quarantine", "Preflight changed manual target quarantine")
+  check(output.include?("brew install --cask --force patrickschaper/tap/matrix-screen-saver"), "Missing qualified migration guidance")
+  check(output.include?(APP_TARGET.to_s), "Missing configured app destination guidance") if target == APP_TARGET
+  check(!output.include?(COFFEE), "Failure printed success")
+  check(PREFS.read == "saved options\x00", "Conflict changed preferences")
+  forced = definition("1.2.3")
+  output = capture { Cask::Installer.new(forced, force: true).install }
+  verify_target("1.2.3")
+  check(!(target/"manual-executable").exist?, "Force did not replace manual bundle")
+  check(output.scan(COFFEE).length == 1, "Forced migration success output wrong")
+  uninstall(forced)
 end
-check(failed, "Native artifact did not reject manual conflict")
-check((TARGET/"manual-executable").read == "manual sentinel", "Manual bundle changed")
-quarantine = SystemCommand.run!("/usr/bin/xattr", args: ["-p", "com.apple.quarantine", TARGET.to_s])
-check(quarantine.stdout.strip == "manual-quarantine", "Preflight changed manual target quarantine")
-check(output.include?("brew install --cask --force patrickschaper/tap/matrix-screen-saver"), "Missing qualified migration guidance")
-check(!output.include?(COFFEE), "Failure printed success")
-check(PREFS.read == "saved options\x00", "Conflict changed preferences")
-forced = definition("1.2.3")
-output = capture { Cask::Installer.new(forced, force: true).install }
-verify_target("1.2.3")
-check(!(TARGET/"manual-executable").exist?, "Force did not replace manual bundle")
-check(output.scan(COFFEE).length == 1, "Forced migration success output wrong")
-uninstall(forced)
 puts "PASS AE2/AE3 native conflict rejection and explicit force replacement"
 
 # Homebrew 7.0.7's existence guard misses dangling symlinks, but its native
@@ -182,4 +260,4 @@ uninstall(forced)
 puts "PASS native broken-symlink conflict and explicit force replacement"
 definition("1.2.3")
 puts "PASS developer-mode definition load and uninstall without legacy warnings"
-puts "PASS all native lifecycle checks; installed saver and real Settings were never touched"
+puts "PASS all native lifecycle checks; real apps, login items, installed bundles and Settings were never touched"

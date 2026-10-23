@@ -88,6 +88,13 @@ struct NeoMessageScene {
         cursorVisible = true
     }
 
+    /// Excludes a suspended interval without rebuilding the typing schedule.
+    ///
+    /// - Parameter duration: Wall-clock seconds during which animation was paused.
+    mutating func shiftTimeline(by duration: TimeInterval) {
+        startTime += duration
+    }
+
     mutating func advance(now: TimeInterval) {
         guard !schedule.isEmpty else { return }
 
