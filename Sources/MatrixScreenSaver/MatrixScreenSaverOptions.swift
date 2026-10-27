@@ -1046,11 +1046,11 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.widthAnchor.constraint(equalToConstant: Self.textFieldWidth * 1.6).isActive = true
         scrollView.heightAnchor.constraint(equalToConstant: 90).isActive = true
 
         stack.addArrangedSubview(label)
         stack.addArrangedSubview(scrollView)
+        scrollView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(makeDescriptionLabel(description))
         return stack
     }
@@ -1208,13 +1208,11 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         return MatrixScreenSaverOptions(
             neoMessageSceneEnabled: neoMessageSceneCheckbox.state == .on,
             neoMessageSpeedFactor: neoMessageSpeedFactor,
-            name: nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: nameField.stringValue,
             neoMessageLines: pendingLines,
             cmdSceneEnabled: cmdSceneCheckbox.state == .on,
             commands: commandsTextView.string
-                .components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty },
+                .components(separatedBy: .newlines),
             numberSceneEnabled: numberSceneCheckbox.state == .on,
             twinkleEnabled: twinkleCheckbox.state == .on,
             diffuseEnabled: diffuseCheckbox.state == .on,

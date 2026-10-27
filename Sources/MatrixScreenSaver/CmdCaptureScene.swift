@@ -172,8 +172,8 @@ final class CmdCaptureTask {
     /// - Parameters:
     ///   - command: Shell command, interpreted with the host environment and extended tool PATH.
     ///   - timeout: Finite positive deadline in seconds; invalid values prevent execution.
-    /// - Returns: UTF-8 stdout, or stderr when stdout is blank. Empty on cancellation,
-    ///   timeout, invalid UTF-8, launch failure, or repeated use. Nonzero exit may still yield output.
+    /// - Returns: UTF-8 stdout, or stderr when stdout is blank. Incomplete or invalid UTF-8
+    ///   uses replacement characters. Empty on cancellation, timeout, launch failure, or repeated use.
     func captureOutput(command: String, timeout: TimeInterval = CmdCaptureScene.captureTimeout) -> String {
         guard !command.isEmpty, !command.utf8.contains(0), timeout.isFinite, timeout > 0 else { return "" }
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
@@ -264,8 +264,8 @@ final class CmdCaptureTask {
         // Kernel-delayed exit must not block the caller; the exit event still reaps it later.
         _ = reaped.wait(timeout: .now() + 1)
         guard completed, !isCancelled else { return "" }
-        let output = String(data: stdout, encoding: .utf8) ?? ""
-        let error = String(data: stderr, encoding: .utf8) ?? ""
+        let output = String(decoding: stdout, as: UTF8.self)
+        let error = String(decoding: stderr, as: UTF8.self)
         return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !error.isEmpty ? error : output
     }
 

@@ -73,6 +73,9 @@ func sharedSaverTests() {
     var options = MatrixScreenSaverOptions.load(from: defaults)
     options.frameRate = 42
     options.neoMessageLines = ["Shared options"]
+    options.name = "Trinity"
+    options.cmdSceneEnabled = true
+    options.commands = ["printf first", "printf second"]
     var applied = false
     let controller = MatrixScreenSaverOptionsSheetController { edited in
         edited.save(to: defaults)
@@ -86,6 +89,8 @@ func sharedSaverTests() {
     let loaded = MatrixScreenSaverOptions.load(from: defaults)
     check(applied && loaded.frameRate == 42 && loaded.neoMessageLines == ["Shared options"] && !loaded.numberSceneEnabled,
           "native Apply validates and delivers options through the reusable callback")
+    check(loaded.name == "Trinity" && loaded.cmdSceneEnabled && loaded.commands == options.commands,
+          "tabbed options preserve the Neo name and command settings through Apply and persistence")
     options.frameRate = -10
     options.save(to: defaults)
     check(MatrixScreenSaverOptions.load(from: defaults).frameRate > 0, "shared persistence retains option sanitization")
@@ -170,6 +175,29 @@ private func glyphCacheTests() {
     check(glyph("A") != nil && glyph("A", bold: true) != nil,
           "restarting after resource cleanup recreates usable glyph caches")
     view.stopAnimation()
+    var capturedOptions = MatrixScreenSaverOptions()
+    capturedOptions.neoMessageSceneEnabled = false
+    capturedOptions.cmdSceneEnabled = true
+    capturedOptions.numberSceneEnabled = false
+    capturedOptions.commands = ["printf '\\303\\251'"]
+    capturedOptions.scanLinesIntensity = 0
+    let container = NSView(frame: view.frame)
+    container.addSubview(view)
+    defer { view.removeFromSuperview() }
+    view.startAnimation()
+    view.applyWallpaperOptions(capturedOptions)
+    let renderer: NativeMatrixRenderer? = stored("nativeRenderer", in: view)
+    let captured = eventually {
+        view.animateOneFrame()
+        return renderer?[NativeMatrixRenderer.contentMargin + 1, NativeMatrixRenderer.contentMargin].scalar == "é"
+    }
+    check(captured, "command output reaches the active native view before raster comparison")
+    let fallbackPixels = pixels(of: view)
+    capturedOptions.characters = "é"
+    view.applyWallpaperOptions(capturedOptions)
+    check(captured && fallbackPixels != nil && fallbackPixels == pixels(of: view),
+          "captured Unicode text matches glyphs explicitly included in the rain character cache")
+    view.stopAnimation()
 }
 
 /// Checks every native tab at its laid-out size and leaves an edit on an inactive page for Apply.
@@ -183,6 +211,8 @@ private func checkOptionsLayout(in window: NSWindow) {
         check(false, "options organize settings into native tabs")
         return
     }
+    check(tabs.tabViewItems.map(\.label) == ["General", "Intro scenes", "Command capture", "Rain"],
+          "command capture integrates into the current native tab structure")
     for item in tabs.tabViewItems {
         tabs.selectTabViewItem(item)
         content.layoutSubtreeIfNeeded()

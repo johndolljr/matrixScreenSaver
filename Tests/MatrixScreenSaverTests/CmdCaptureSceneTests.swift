@@ -86,6 +86,10 @@ func cmdCaptureTaskTests() {
     ok(large.utf8.count == 65536 && large.allSatisfy { $0 == "x" }, "CmdCaptureTask: drains simultaneous streams with bounded retained output")
     let largeError = CmdCaptureTask().captureOutput(command: "/usr/bin/head -c 262144 /dev/zero | /usr/bin/tr '\\000' e >&2", timeout: 3)
     ok(largeError.utf8.count == 65536, "CmdCaptureTask: stderr retention is bounded too")
+    let unicodeBoundary = CmdCaptureTask().captureOutput(
+        command: "/usr/bin/head -c 65535 /dev/zero | /usr/bin/tr '\\000' x; printf '\\303\\251'", timeout: 3)
+    ok(unicodeBoundary.hasPrefix(String(repeating: "x", count: 65535)),
+       "CmdCaptureTask: a UTF-8 sequence crossing the byte cap does not discard the valid prefix")
 
     let start = ProcessInfo.processInfo.systemUptime
     let timedOut = CmdCaptureTask().captureOutput(command: "exec 1>&- 2>&-; /bin/sleep 5", timeout: 0.1)
