@@ -1,8 +1,13 @@
 import Foundation
 
 func nativeMatrixRendererTests() {
+    commandCaptureLifecycleTests()
     ok(NativeMatrixRenderer().seedOffset == 0,
        "NativeMatrixRenderer: seedOffset defaults to 0")
+    var named = NativeMatrixRenderer.Configuration()
+    named.neoMessageName = "Trinity"
+    ok(named.sanitized().neoMessageLines.first == "Wake up, Trinity...",
+       "NativeMatrixRenderer: a name customizes default intro lines without explicit lines")
 
     let palette = NativeMatrixRenderer().levelColors
     let hasNoPureWhite = !palette.contains { color in
@@ -122,4 +127,73 @@ func nativeMatrixRendererTests() {
     ok(String(String.UnicodeScalarView(earlyText)).contains(expectedText) && earlyText == lateText,
        "NativeMatrixRenderer: pause between display phase advances preserves identical Number-scene timestamps")
     ok(earlyText == startupText, "NativeMatrixRenderer: a display starting after resume keeps the same scripted content and seed")
+}
+
+/// Exercises command side effects through renderer setup, playback, and teardown.
+private func commandCaptureLifecycleTests() {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let output = directory.appendingPathComponent("launches")
+    let renderer = NativeMatrixRenderer()
+    var configuration = NativeMatrixRenderer.Configuration()
+    configuration.neoMessageSceneEnabled = false
+    configuration.cmdSceneEnabled = true
+    configuration.numberSceneEnabled = false
+    configuration.commands = ["printf x >> '\(output.path)'"]
+    renderer.updateConfiguration(configuration)
+    renderer.resize(to: TerminalSize(columns: 40, rows: 20))
+    renderer.updateConfiguration(configuration)
+    Thread.sleep(forTimeInterval: 0.2)
+    ok(!FileManager.default.fileExists(atPath: output.path),
+       "Command capture: stopped setup and layout never execute commands")
+
+    renderer.start()
+    Thread.sleep(forTimeInterval: 0.3)
+    renderer.stop()
+    ok((try? String(contentsOf: output, encoding: .utf8)) == "x",
+       "Command capture: start executes exactly once after stopped setup")
+
+    let delayed = directory.appendingPathComponent("after-stop")
+    configuration.commands = ["sleep 0.4; printf x > '\(delayed.path)'"]
+    renderer.updateConfiguration(configuration)
+    renderer.start()
+    Thread.sleep(forTimeInterval: 0.1)
+    renderer.stop()
+    Thread.sleep(forTimeInterval: 0.6)
+    ok(!FileManager.default.fileExists(atPath: delayed.path),
+       "Command capture: stop cancels active work and its later side effects")
+
+    configuration.commands = ["printf CAPTURE"]
+    renderer.updateConfiguration(configuration)
+    renderer.start()
+    let row = NativeMatrixRenderer.contentMargin + 1
+    func displaysCapture() -> Bool {
+        let scalars = (0..<40).map { renderer[row, $0].scalar }
+        return String(String.UnicodeScalarView(scalars)).contains("CAPTURE")
+    }
+    let deadline = Date(timeIntervalSinceNow: 2)
+    repeat {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        renderer.advance()
+    } while !displaysCapture() && Date() < deadline
+    ok(displaysCapture(), "Command capture: an active frame reveals the captured output")
+    let pauseStart = Date.timeIntervalSinceReferenceDate
+    Thread.sleep(forTimeInterval: 3)
+    renderer.shiftTimeline(by: Date.timeIntervalSinceReferenceDate - pauseStart)
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+    renderer.advance()
+    ok(displaysCapture() && !renderer.consumeCmdSceneDone(),
+       "Command capture: resume retains output instead of consuming its hold during suspension")
+    renderer.stop()
+
+    renderer.start()
+    let capturePauseStart = Date.timeIntervalSinceReferenceDate
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 3))
+    renderer.shiftTimeline(by: Date.timeIntervalSinceReferenceDate - capturePauseStart)
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+    renderer.advance()
+    ok(displaysCapture() && !renderer.consumeCmdSceneDone(),
+       "Command capture: completion during suspension gets its full reveal interval on resume")
+    renderer.stop()
 }

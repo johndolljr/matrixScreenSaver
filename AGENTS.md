@@ -60,7 +60,6 @@ This repository is hosted on GitHub. When relevant, assume GitHub-native feature
 | `install.sh` | Builds and installs to `~/Library/Screen Savers/`, kills `ScreenSaverEngine` |
 | `preview.sh` | Builds and launches the saver in the preview host for fast iteration |
 | `Scripts/install-saver.sh` | Shared installer (strips quarantine, copies with `ditto`, verifies hash) |
-| `Scripts/apply-theme.sh` | Applies the full desktop theme (dark mode/accent, wallpaper, iTerm2 profile, Terminal preset) and installs/selects the saver — see `theme/` |
 
 ### CI — `.github/workflows/`
 
@@ -192,4 +191,3 @@ feat: add character size options
 - Trigger releases by running the **Release** GitHub Actions workflow (`workflow_dispatch`) — never manually.
 - The workflow bumps the version, updates `CHANGELOG.md`, and opens a `release/*` PR targeting `main`.
 - Merging that `release/*` PR into `main` triggers the publish job, which creates the actual GitHub release with a zipped `.saver` bundle attached.
-

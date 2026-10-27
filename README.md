@@ -49,6 +49,12 @@ The saver exposes a native **Options…** sheet. The values are stored with `Scr
 | Scan lines intensity | Opacity of the CRT scan line overlay (0 = off, 100 = fully opaque). | 25 |
 | Scan lines vertical | Orientation of the scan line overlay (vertical or horizontal). | On (vertical) |
 
+Command capture executes your configured commands through `/bin/sh` with the host's permissions.
+Only enter commands you trust, and avoid sensitive output: it is visible on the screen saver,
+including while the screen is locked. Command text and output are not logged. Each capture has
+a 12-second deadline and retains at most 64 KiB per output stream; stopping or restarting playback
+cancels its command. The sandboxed screen saver may not have the same access as the wallpaper app.
+
 ### Wallpaper menubar menu
 
 ![menubar.jpg](docs/wallpaper-menubar.jpg)

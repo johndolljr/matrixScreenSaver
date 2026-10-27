@@ -3,29 +3,42 @@ import Darwin
 
 /// The drawing state snapshot the view uses to render the current cmd capture frame.
 struct CmdCaptureRenderState {
+    /// Captured rows, already clipped to the display dimensions.
     let lines: [String]
+    /// Number of rows currently revealed.
     let visibleLineCount: Int
+    /// Launching indicator, absent after capture finishes.
     let statusLine: String?
 }
 
-/// Time-driven state machine that runs an external command in the background,
-/// captures its stdout, and reveals the captured lines a row at a time before
-/// handing off to the next scene (the trace program / number intro).
+/// Time-driven reveal and hold sequence for output supplied by a background capture task.
 struct CmdCaptureScene {
+    /// Stages of capture presentation.
     enum Phase: Equatable {
+        /// Waiting for a background capture result.
         case launching
+        /// Showing captured rows progressively.
         case revealing
+        /// Keeping all captured rows visible.
         case holding
+        /// Finished or skipped because the command was empty.
         case done
     }
 
+    /// Rows revealed per active second.
     static let linesPerSecond: Double = 14.0
+    /// Seconds the fully revealed output remains visible.
     static let holdDuration: TimeInterval = 2.5
+    /// Maximum command and pipe-completion duration, excluding bounded cleanup.
     static let captureTimeout: TimeInterval = 12.0
+    /// Indicator shown while the background task runs.
     static let statusLineText = "Querying..."
 
+    /// Current presentation stage.
     private(set) var phase: Phase = .done
+    /// Number of captured rows revealed so far.
     private(set) var visibleLineCount: Int = 0
+    /// Captured rows clipped to display dimensions.
     private(set) var lines: [String] = []
 
     private var startTime: TimeInterval = 0
@@ -33,18 +46,18 @@ struct CmdCaptureScene {
     private var revealEndElapsed: TimeInterval = 0
     private var holdEndElapsed: TimeInterval = 0
 
-    /// Wall-clock duration of the scene once capture completes; `nil` while still launching.
+    /// Active duration of the scene; `nil` while still launching.
     var scheduledDuration: TimeInterval? {
         captureElapsed == nil ? nil : holdEndElapsed
     }
 
-    /// Resets the scene for a new session. Does not launch anything itself — callers run
-    /// `command` (e.g. via ``captureOutput(command:timeout:)`` on a background queue) and
-    /// report the result back through ``receiveCapture(_:maxLines:maxColumns:now:)``.
+    /// Resets presentation without launching a command.
+    /// Call ``CmdCaptureTask/captureOutput(command:timeout:)`` on a background queue,
+    /// then deliver its result through ``receiveCapture(_:maxLines:maxColumns:now:)``.
     ///
     /// - Parameters:
-    ///   - startTime: Reference-relative wall-clock time the scene begins.
-    ///   - command: The command that will be run. Empty skips straight to `.done`.
+    ///   - startTime: Reference-relative time the scene begins.
+    ///   - command: Command to capture. Empty skips straight to `.done`.
     mutating func reset(startTime: TimeInterval, command: String) {
         self.startTime = startTime
         lines = []
@@ -55,15 +68,20 @@ struct CmdCaptureScene {
         phase = command.isEmpty ? .done : .launching
     }
 
-    /// Records the captured output once the background command finishes.
-    /// `now` is the same reference-relative clock used by `advance(now:)`.
+    /// Records a capture result and schedules its reveal and hold.
+    ///
+    /// - Parameters:
+    ///   - output: Captured command output.
+    ///   - maxLines: Maximum retained nonempty rows, clamped to at least one.
+    ///   - maxColumns: Maximum characters per row, clamped to at least one.
+    ///   - now: Same reference-relative clock used by ``advance(now:)``.
     mutating func receiveCapture(_ output: String, maxLines: Int, maxColumns: Int, now: TimeInterval) {
         guard phase == .launching else { return }
         let trimmedLines = output
-            .split(separator: "\n", omittingEmptySubsequences: false)
+            .split(separator: "\n", maxSplits: max(maxLines, 1), omittingEmptySubsequences: true)
+            .prefix(max(maxLines, 1))
             .map { String($0.prefix(max(maxColumns, 1))) }
-            .filter { !$0.isEmpty }
-        lines = trimmedLines.isEmpty ? ["(no output)"] : Array(trimmedLines.prefix(max(maxLines, 1)))
+        lines = trimmedLines.isEmpty ? ["(no output)"] : trimmedLines
 
         let elapsed = max(now - startTime, 0)
         captureElapsed = elapsed
@@ -73,9 +91,19 @@ struct CmdCaptureScene {
         phase = .revealing
     }
 
+    /// Excludes a suspended interval without rebuilding the reveal schedule.
+    ///
+    /// - Parameter duration: Seconds during which animation was paused.
+    mutating func shiftTimeline(by duration: TimeInterval) {
+        startTime += duration
+    }
+
+    /// Updates the reveal stage using the scene's reference-relative clock.
+    ///
+    /// - Parameter now: Current reference-relative time in seconds.
     mutating func advance(now: TimeInterval) {
         guard phase != .done else { return }
-        guard let captureElapsed else { return } // still launching; waiting on receiveCapture
+        guard let captureElapsed else { return }
         let sceneTime = now - startTime
 
         if sceneTime < captureElapsed {
@@ -94,6 +122,7 @@ struct CmdCaptureScene {
         }
     }
 
+    /// Snapshot for the native renderer at the current presentation stage.
     var renderState: CmdCaptureRenderState {
         switch phase {
         case .done:
@@ -104,131 +133,177 @@ struct CmdCaptureScene {
             return CmdCaptureRenderState(lines: lines, visibleLineCount: visibleLineCount, statusLine: nil)
         }
     }
+}
 
-    /// Runs `command` via `/bin/sh -c` on the calling thread (intended to be a background
-    /// queue) and returns captured stdout, or an empty string if the command fails, is
-    /// missing, or exceeds `timeout`. Reads both pipes concurrently with process execution
-    /// to avoid the classic `Process`/`Pipe` deadlock on large output. stderr is always
-    /// logged via `NSLog` for diagnostics, and is used as a fallback result when stdout is
-    /// empty so a failing command (e.g. a sandboxed screen saver process unable to reach a
-    /// tool's usual environment) reads its failure reason on screen instead of just
-    /// "(no output)".
-    /// Common Homebrew/system binary directories, prepended to `PATH` so commands resolve
-    /// the same way they would from an interactive shell. The screen saver host process
-    /// (`legacyScreenSaver.appex`) is sandboxed and its inherited `PATH` typically omits
-    /// these, so tools like `kubectl` installed under `/usr/local/bin` or
-    /// `/opt/homebrew/bin` otherwise fail with "command not found".
+/// Single-use synchronous command capture with thread-safe cancellation.
+/// Owns a process group so timeout/cancellation also stops ordinary shell pipelines.
+/// Commands and captured payloads are never logged; host HOME and sandbox restrictions remain intact.
+/// Descendants that deliberately create a new session/process group are outside this group's control.
+final class CmdCaptureTask {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var started = false
+    private static let byteLimit = 64 * 1024
     private static let extraPathDirectories = [
-        "/opt/homebrew/bin", "/opt/homebrew/sbin",
-        "/usr/local/bin", "/usr/local/sbin",
+        "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin",
         "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     ]
 
-    /// The real user home directory, read from the system password database rather than
-    /// the `HOME` environment variable. App Sandbox redirects `HOME` for the (sandboxed)
-    /// screen saver host process to a container path, which breaks tools that locate their
-    /// config relative to home (e.g. `kubectl` looking for `~/.kube/config`).
-    private static var realHomeDirectory: String? {
-        guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else { return nil }
-        return String(cString: dir)
+    /// Prevents launch or asks the running capture to stop; safe from any thread.
+    /// Running work observes cancellation within its 20 ms poll interval, then cleans up.
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
     }
 
-    static func captureOutput(command: String, timeout: TimeInterval = captureTimeout) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
+    private var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    /// Executes `/bin/sh -c` on the calling background thread, once per task.
+    /// Retains at most 64 KiB per stream while draining excess bytes. One monotonic
+    /// deadline covers both child exit and pipe EOF, followed by TERM/KILL cleanup.
+    /// Cleanup adds at most 100 ms TERM grace and a one-second exit-event wait;
+    /// a kernel-delayed exit is reaped by that event without blocking the caller further.
+    ///
+    /// - Parameters:
+    ///   - command: Shell command, interpreted with the host environment and extended tool PATH.
+    ///   - timeout: Finite positive deadline in seconds; invalid values prevent execution.
+    /// - Returns: UTF-8 stdout, or stderr when stdout is blank. Empty on cancellation,
+    ///   timeout, invalid UTF-8, launch failure, or repeated use. Nonzero exit may still yield output.
+    func captureOutput(command: String, timeout: TimeInterval = CmdCaptureScene.captureTimeout) -> String {
+        guard !command.isEmpty, !command.utf8.contains(0), timeout.isFinite, timeout > 0 else { return "" }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        guard var outputPipe = Self.makePipe() else { return "" }
+        defer { outputPipe.forEach { close($0) } }
+        guard var errorPipe = Self.makePipe() else { return "" }
+        defer { errorPipe.forEach { close($0) } }
+
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { return "" }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        var attributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attributes) == 0 else { return "" }
+        defer { posix_spawnattr_destroy(&attributes) }
+        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)) == 0,
+              posix_spawnattr_setpgroup(&attributes, 0) == 0,
+              posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0,
+              posix_spawn_file_actions_adddup2(&actions, outputPipe[1], STDOUT_FILENO) == 0,
+              posix_spawn_file_actions_adddup2(&actions, errorPipe[1], STDERR_FILENO) == 0 else { return "" }
 
         var environment = ProcessInfo.processInfo.environment
         let existingPath = environment["PATH"] ?? ""
         let existingComponents = Set(existingPath.split(separator: ":").map(String.init))
-        let mergedPath = (extraPathDirectories.filter { !existingComponents.contains($0) } + [existingPath])
-            .filter { !$0.isEmpty }
-            .joined(separator: ":")
-        environment["PATH"] = mergedPath
-        if let realHome = realHomeDirectory {
-            environment["HOME"] = realHome
-        }
-        process.environment = environment
+        environment["PATH"] = (Self.extraPathDirectories.filter { !existingComponents.contains($0) } + [existingPath])
+            .filter { !$0.isEmpty }.joined(separator: ":")
+        let arguments = ["/bin/sh", "-c", command].map { strdup($0) }
+        let variables = environment.map { strdup("\($0.key)=\($0.value)") }
+        defer { (arguments + variables).forEach { free($0) } }
+        var argv = arguments + [nil]
+        var envp = variables + [nil]
+        var pid: pid_t = 0
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-        } catch {
-            NSLog("MatrixScreenSaver cmd capture failed to launch '%@': %@", command, error.localizedDescription)
+        // Serialize the launch boundary with cancel so pre-launch cancellation cannot spawn.
+        lock.lock()
+        guard !cancelled, !started, ProcessInfo.processInfo.systemUptime < deadline else {
+            lock.unlock()
             return ""
         }
+        started = true
+        let result = posix_spawn(&pid, "/bin/sh", &actions, &attributes, &argv, &envp)
+        lock.unlock()
+        guard result == 0 else { return "" }
 
-        var capturedOutput = Data()
-        var capturedError = Data()
-        let readQueue = DispatchQueue(label: "dev.patsch.MatrixScreenSaver.cmdCapture.read", attributes: .concurrent)
-        let outputDone = DispatchSemaphore(value: 0)
-        let errorDone = DispatchSemaphore(value: 0)
-        readQueue.async {
-            capturedOutput = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            outputDone.signal()
+        // Arm before observing exit, but do not reap until the process group has been killed.
+        let reaped = DispatchSemaphore(value: 0)
+        let exitSource = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .global())
+        exitSource.setEventHandler {
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, WNOHANG)
+            exitSource.cancel()
+            exitSource.setEventHandler {}
+            reaped.signal()
         }
-        readQueue.async {
-            capturedError = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            errorDone.signal()
+        close(outputPipe[1])
+        close(errorPipe[1])
+        outputPipe[1] = -1
+        errorPipe[1] = -1
+
+        var stdout = Data()
+        var stderr = Data()
+        var outputOpen = true
+        var errorOpen = true
+        var completed = false
+        while !isCancelled && ProcessInfo.processInfo.systemUptime < deadline {
+            Self.drain(outputPipe[0], into: &stdout, open: &outputOpen)
+            Self.drain(errorPipe[0], into: &stderr, open: &errorOpen)
+            var info = siginfo_t()
+            // Keep the leader unreaped until group cleanup to prevent PID/group-ID reuse.
+            let exited = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == pid
+            if exited && !outputOpen && !errorOpen {
+                completed = true
+                break
+            }
+            var descriptors = [
+                pollfd(fd: outputOpen ? outputPipe[0] : -1, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: errorOpen ? errorPipe[0] : -1, events: Int16(POLLIN), revents: 0),
+            ]
+            _ = poll(&descriptors, nfds_t(descriptors.count), 20)
         }
 
-        let deadline = DispatchTime.now() + timeout
-        guard outputDone.wait(timeout: deadline) == .success,
-              errorDone.wait(timeout: deadline) == .success else {
-            process.terminate()
-            NSLog("MatrixScreenSaver cmd capture timed out after %.1fs: '%@'", timeout, command)
-            return ""
+        if !completed {
+            kill(-pid, SIGTERM)
+            usleep(100_000)
         }
-        process.waitUntilExit()
-
-        let stdout = String(data: capturedOutput, encoding: .utf8) ?? ""
-        let stderr = String(data: capturedError, encoding: .utf8) ?? ""
-        logCapture(command: command, exitCode: process.terminationStatus, stdout: stdout, stderr: stderr, environment: environment)
-        if !stderr.isEmpty {
-            NSLog("MatrixScreenSaver cmd capture stderr for '%@' (exit %d): %@", command, process.terminationStatus, stderr)
-        }
-        if stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !stderr.isEmpty {
-            return stderr
-        }
-        return stdout
+        // Kill remaining descendants even when the leader exited and closed both pipes.
+        kill(-pid, SIGKILL)
+        exitSource.resume()
+        // Kernel-delayed exit must not block the caller; the exit event still reaps it later.
+        _ = reaped.wait(timeout: .now() + 1)
+        guard completed, !isCancelled else { return "" }
+        let output = String(data: stdout, encoding: .utf8) ?? ""
+        let error = String(data: stderr, encoding: .utf8) ?? ""
+        return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !error.isEmpty ? error : output
     }
 
-    /// Appends a full record of a capture attempt (command, exit code, PATH/HOME used,
-    /// stdout, stderr) to a plain-text log file under the process's Logs directory.
-    /// Exists purely for troubleshooting sandboxed-environment failures (missing PATH
-    /// entries, redirected HOME, network restrictions) from outside the sandbox, since the
-    /// on-screen output is otherwise the only place this ever surfaces.
-    private static func logCapture(command: String, exitCode: Int32, stdout: String, stderr: String, environment: [String: String]) {
-        guard let logsDir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Logs", isDirectory: true) else { return }
-        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
-        let logFile = logsDir.appendingPathComponent("MatrixScreenSaver-cmd-debug.log")
+    /// Creates a pipe above standard descriptors, with a nonblocking reader and close-on-exec endpoints.
+    ///
+    /// - Returns: Reader and writer descriptors owned by the caller, or `nil` on setup failure.
+    private static func makePipe() -> [Int32]? {
+        var raw: [Int32] = [0, 0]
+        guard pipe(&raw) == 0 else { return nil }
+        defer { raw.forEach { close($0) } }
+        let reader = fcntl(raw[0], F_DUPFD_CLOEXEC, 3)
+        guard reader >= 0 else { return nil }
+        let writer = fcntl(raw[1], F_DUPFD_CLOEXEC, 3)
+        guard writer >= 0 else { close(reader); return nil }
+        guard fcntl(reader, F_SETFL, O_NONBLOCK) == 0 else {
+            close(reader)
+            close(writer)
+            return nil
+        }
+        return [reader, writer]
+    }
 
-        let entry = """
-        ---
-        \(Date())
-        command: \(command)
-        exitCode: \(exitCode)
-        PATH: \(environment["PATH"] ?? "")
-        HOME: \(environment["HOME"] ?? "")
-        stdout (\(stdout.utf8.count) bytes):
-        \(stdout)
-        stderr (\(stderr.utf8.count) bytes):
-        \(stderr)
-
-        """
-
-        if let data = entry.data(using: .utf8) {
-            if let handle = try? FileHandle(forWritingTo: logFile) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
+    /// Drains a bounded batch so a continuously writing child cannot starve cancellation checks.
+    ///
+    /// - Parameters:
+    ///   - fd: Nonblocking read descriptor.
+    ///   - data: Retained stream prefix, capped at ``byteLimit`` bytes.
+    ///   - open: Cleared on EOF or a permanent read error; descriptor ownership stays with the caller.
+    private static func drain(_ fd: Int32, into data: inout Data, open: inout Bool) {
+        guard open else { return }
+        var buffer = [UInt8](repeating: 0, count: 8192)
+        for _ in 0..<8 {
+            let count = read(fd, &buffer, buffer.count)
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(min(count, byteLimit - data.count)))
             } else {
-                try? data.write(to: logFile)
+                if count == 0 || (errno != EAGAIN && errno != EINTR) { open = false }
+                return
             }
         }
     }

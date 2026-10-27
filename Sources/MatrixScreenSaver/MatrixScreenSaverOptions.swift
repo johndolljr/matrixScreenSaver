@@ -63,8 +63,8 @@ struct MatrixScreenSaverOptions: Equatable {
     static let neoMessageSpeedFactorDescription = "Speed multiplier for intro scene typing (Neo message and number scene). Default: 1.0."
     static let nameDescription = "Name used in the intro message (\"Wake up, {name}...\"). Empty = Neo."
     static let neoMessageLinesDescription = "Lines typed during the Neo message intro (0–10, max 256 chars). Leave empty to use the Name-based default message."
-    static let cmdSceneDescription = "Run a command and reveal its captured output before the trace program. Off by default — most installs won't have a command configured."
-    static let commandsDescription = "One shell command per line. A random one runs each time the screen saver starts. Empty disables the scene."
+    static let cmdSceneDescription = "Run a trusted shell command before the trace program. Off by default. Commands run with the host's permissions; output is visible even while the screen is locked."
+    static let commandsDescription = "One shell command per line (up to 20, 512 characters each). Overlong commands are ignored. A random one runs each time the screen saver starts. Empty disables the scene."
     static let numberSceneDescription = "Show the startup number scene. On by default."
     static let diffuseDescription = "On by default."
     static let twinkleDescription = "On by default."
@@ -110,6 +110,8 @@ struct MatrixScreenSaverOptions: Equatable {
         characterWidth != previous.characterWidth || characterHeight != previous.characterHeight ||
         neoMessageSceneEnabled != previous.neoMessageSceneEnabled ||
         neoMessageSpeedFactor != previous.neoMessageSpeedFactor || neoMessageLines != previous.neoMessageLines ||
+        (neoMessageLines.isEmpty && name != previous.name) ||
+        cmdSceneEnabled != previous.cmdSceneEnabled || commands != previous.commands ||
         numberSceneEnabled != previous.numberSceneEnabled ||
         rainRunForever != previous.rainRunForever || rainDurationSeconds != previous.rainDurationSeconds
     }
@@ -147,8 +149,8 @@ struct MatrixScreenSaverOptions: Equatable {
         }()
         let sanitizedCommands: [String] = commands
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .map { String($0.prefix(Self.maxCommandLength)) }
-            .filter { !$0.isEmpty }
+            // Clipping shell text can change which files or actions a command targets.
+            .filter { !$0.isEmpty && $0.count <= Self.maxCommandLength && !$0.utf8.contains(0) }
             .prefix(Self.maxCommandCount)
             .map { $0 }
         return MatrixScreenSaverOptions(
@@ -1037,6 +1039,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.setAccessibilityLabel(title)
         textView.textContainerInset = NSSize(width: 6, height: 6)
 
         scrollView.documentView = textView

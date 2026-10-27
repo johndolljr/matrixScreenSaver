@@ -91,6 +91,10 @@ func sharedSaverTests() {
     check(MatrixScreenSaverOptions.load(from: defaults).frameRate > 0, "shared persistence retains option sanitization")
 
     let original = MatrixScreenSaverOptions()
+    var commandOptions = original
+    commandOptions.commands = [String(repeating: "x", count: 513), "printf safe", "printf bad\0ignored"]
+    check(commandOptions.sanitized().commands == ["printf safe"],
+          "command sanitization rejects invalid text instead of executing a clipped command")
     var live = original
     live.twinkleEnabled.toggle()
     live.diffuseEnabled.toggle()
@@ -107,6 +111,9 @@ func sharedSaverTests() {
         ("Neo enablement", { $0.neoMessageSceneEnabled.toggle() }),
         ("intro speed", { $0.neoMessageSpeedFactor = 2 }),
         ("Neo lines", { $0.neoMessageLines = ["Changed intro"] }),
+        ("Neo name", { $0.name = "Trinity" }),
+        ("command enablement", { $0.cmdSceneEnabled.toggle() }),
+        ("command list", { $0.commands = ["printf hello"] }),
         ("number intro", { $0.numberSceneEnabled.toggle() }),
         ("rain cycle mode", { $0.rainRunForever.toggle() }),
         ("rain cycle duration", { $0.rainDurationSeconds += 1 }),
@@ -116,6 +123,12 @@ func sharedSaverTests() {
         change(&changed)
         check(changed.requiresSceneRestart(comparedTo: original), "\(name) requests a coordinated scene restart")
     }
+    var custom = original
+    custom.neoMessageLines = ["Custom intro"]
+    var renamed = custom
+    renamed.name = "Trinity"
+    check(!renamed.requiresSceneRestart(comparedTo: custom),
+          "unused Neo name does not restart custom intro lines")
 }
 
 /// Checks raster reuse through layout and option updates, retaining images to compare identity safely.

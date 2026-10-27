@@ -16,7 +16,7 @@ final class NativeMatrixRenderer {
         var errorRate = 1.0
         var characters = ""
         var neoMessageName = ""
-        var neoMessageLines: [String] = NeoMessageScene.defaultLines
+        var neoMessageLines: [String] = []
         /// When true the 10-second multi-screen sync delay is skipped so scenes
         /// start within one second of launch. Set for preview contexts where
         /// cross-display alignment is unnecessary.
@@ -273,7 +273,7 @@ final class NativeMatrixRenderer {
     /// Stable scripted-content date supplied separately when a shared playback anchor was paused.
     var overrideSceneContentStartTime: TimeInterval?
 
-    private var configuration = Configuration()
+    private var configuration = Configuration().sanitized()
     private var activeGlyphPool: [UnicodeScalar] = NativeMatrixRenderer.defaultGlyphPool
 
     var supportedScalars: [UnicodeScalar] {
@@ -284,7 +284,10 @@ final class NativeMatrixRenderer {
 
     private var neoScene = NeoMessageScene()
     private var cmdScene = CmdCaptureScene()
-    private var cmdCaptureToken = UUID()
+    /// The current command's cancellation handle; stopped renderers never own a capture.
+    private var cmdCaptureTask: CmdCaptureTask?
+    /// Results wait for an active frame so suspension cannot consume their display time.
+    private var pendingCmdCaptureOutput: String?
     private let cmdCaptureQueue = DispatchQueue(label: "dev.patsch.MatrixScreenSaver.cmdCapture")
     private var layers = [Layer(), Layer(), Layer()]
     private var renderCells: [RenderCell] = []
@@ -398,6 +401,18 @@ final class NativeMatrixRenderer {
     /// Stops the renderer so no more simulation work is produced.
     func stop() {
         running = false
+        cancelCmdCapture()
+    }
+
+    deinit {
+        cmdCaptureTask?.cancel()
+    }
+
+    /// Invalidates both queued execution and results from the previous scene generation.
+    private func cancelCmdCapture() {
+        cmdCaptureTask?.cancel()
+        cmdCaptureTask = nil
+        pendingCmdCaptureOutput = nil
     }
 
     /// Excludes paused wall-clock time while retaining cells, random state, and scene progress.
@@ -410,6 +425,7 @@ final class NativeMatrixRenderer {
         rainStartTime += duration
         if let start = overrideSceneStartTime { overrideSceneStartTime = start + duration }
         neoScene.shiftTimeline(by: duration)
+        cmdScene.shiftTimeline(by: duration)
     }
 
     /// Returns whether a restart has been requested (by `stepRainFrame()` when
@@ -865,7 +881,7 @@ final class NativeMatrixRenderer {
     /// instantly revealing a full line, such as a captured cmd output row.
     private func setRow(_ row: Int, text: String) {
         let m = Self.numberIntroMargin
-        guard row >= 0, row < rows, columns > m else { return }
+        guard row >= 0, row < rows, columns > m * 2 else { return }
         let baseGreenLevel = max(levelColors.count / 2, 1)
         let scalars = Array(text.unicodeScalars)
         let offset = row * columns
@@ -1045,11 +1061,11 @@ final class NativeMatrixRenderer {
         }
     }
 
-    /// Initializes the cmd capture scene and launches the configured command
-    /// on a background queue. A stale-token guard discards results from a
-    /// previous launch if the scene sequence restarts before the command exits.
+    /// Launches one cancellable capture only when this scene enters active playback.
     private func beginCmdCaptureScene() {
         activeScene = .cmdCapture
+        guard running else { return }
+        cancelCmdCapture()
         for i in renderCells.indices { renderCells[i] = Self.blankRenderCell }
         for i in visibleCountByRow.indices { visibleCountByRow[i] = 0 }
         markAllRowsDirty()
@@ -1063,30 +1079,31 @@ final class NativeMatrixRenderer {
         var commandPickerRNG = Xorshift64(seed: Self.mixSeed(sceneSeed &+ 5))
         let command = configuration.commands.randomElement(using: &commandPickerRNG) ?? ""
 
-        cmdScene.reset(startTime: sceneStartTime, command: command)
+        cmdScene.reset(startTime: Date.timeIntervalSinceReferenceDate, command: command)
         guard cmdScene.phase != .done else { return }
 
-        let token = UUID()
-        cmdCaptureToken = token
-        let m = Self.numberIntroMargin
-        // Content rows run m+1..<rows-m elsewhere (fillNumberRain, dissolve, scroll), so cap
-        // the last usable row at rows-m-1 — writing all the way to rows-m would leave that
-        // bottom line outside every one of those ranges, stranding it on screen forever.
-        let maxLines = max(rows - m * 2 - 1, 1)
-        let maxColumns = max(columns - m * 2, 1)
+        let task = CmdCaptureTask()
+        cmdCaptureTask = task
         cmdCaptureQueue.async { [weak self] in
-            let output = CmdCaptureScene.captureOutput(command: command)
+            let output = task.captureOutput(command: command)
             DispatchQueue.main.async {
-                guard let self, self.cmdCaptureToken == token else { return }
-                let now = Date.timeIntervalSinceReferenceDate
-                self.cmdScene.receiveCapture(output, maxLines: maxLines, maxColumns: maxColumns, now: now)
+                guard let self, self.running, self.cmdCaptureTask === task else { return }
+                self.pendingCmdCaptureOutput = output
             }
         }
     }
 
     /// Advances the cmd capture scene by one simulation step.
     private func stepCmdCaptureFrame() {
-        cmdScene.advance(now: Date.timeIntervalSinceReferenceDate)
+        let now = Date.timeIntervalSinceReferenceDate
+        if let output = pendingCmdCaptureOutput {
+            pendingCmdCaptureOutput = nil
+            let m = Self.numberIntroMargin
+            // Leave the bottom margin outside the later Number-scene dissolve.
+            cmdScene.receiveCapture(output, maxLines: max(rows - m * 2 - 1, 1),
+                                    maxColumns: max(columns - m * 2, 1), now: now)
+        }
+        cmdScene.advance(now: now)
         let state = cmdScene.renderState
         let m = Self.numberIntroMargin
         if let statusLine = state.statusLine {
@@ -1109,6 +1126,10 @@ final class NativeMatrixRenderer {
 
     /// Chooses and initializes the first scene for the current session.
     private func beginSceneSequence() {
+        cancelCmdCapture()
+        neoSceneDoneRequested = false
+        cmdSceneDoneRequested = false
+        numberSceneDoneRequested = false
         now = 100
         frameIndex = 0
 
