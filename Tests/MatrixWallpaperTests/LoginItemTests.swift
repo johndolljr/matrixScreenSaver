@@ -77,13 +77,16 @@ func loginItemTests() {
 
     status = .enabled
     menu.removeAllItems()
-    let host = WallpaperApp(loginItems: controller)
+    let desktop = DesktopWallpaperFixture()
+    let host = WallpaperApp(loginItems: controller, desktopWallpaper: desktop.controller())
     host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     let hostMenu = controller.item.menu!
     status = .notRegistered
     hostMenu.delegate?.menuWillOpen?(hostMenu)
     check(hostMenu.items.filter { $0.target === controller }.count == 1 && controller.item.state == .off,
           "host menu contains exactly one login control and refreshes system status")
+    check(eventually { ScreenSyncCoordinator.shared.registeredCount == NSScreen.screens.count },
+          "login controls are ready before deferred wallpaper playback starts")
     status = .enabled
     let windows = Set(NSApp.windows.filter { $0 is DesktopWindow && $0.isVisible }.map(ObjectIdentifier.init))
     hostMenu.delegate?.menuWillOpen?(hostMenu)
