@@ -271,7 +271,8 @@ final class CmdCaptureTask {
         let exitSource = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .global())
         exitSource.setEventHandler {
             var status: Int32 = 0
-            _ = waitpid(pid, &status, WNOHANG)
+            // An exit event can arrive before the child is waitable; reap on this background queue.
+            while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
             exitSource.cancel()
             exitSource.setEventHandler {}
             reaped.signal()

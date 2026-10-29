@@ -183,23 +183,29 @@ func cmdCaptureTaskTests() {
     cancelled.cancel()
     ok(cancelled.captureOutput(command: "printf bad > '\(marker)'").isEmpty && !FileManager.default.fileExists(atPath: marker), "CmdCaptureTask: cancellation before launch prevents side effects")
 
-    let running = CmdCaptureTask()
-    let finished = DispatchSemaphore(value: 0)
     let command = "trap '' TERM; (trap '' TERM; printf '%s' $$ > '\(ready)'; /bin/sleep 0.7; printf escaped > '\(late)') | /bin/cat; wait"
-    DispatchQueue.global().async {
-        _ = running.captureOutput(command: command, timeout: 3)
-        finished.signal()
+    // Repeat because process-exit notification can precede waitpid readiness on macOS.
+    for _ in 0..<20 {
+        try? FileManager.default.removeItem(atPath: ready)
+        let running = CmdCaptureTask()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = running.captureOutput(command: command, timeout: 3)
+            finished.signal()
+        }
+        let readyDeadline = ProcessInfo.processInfo.systemUptime + 2
+        var pid: Int32 = 0
+        repeat {
+            let pidText = (try? String(contentsOfFile: ready, encoding: .utf8)) ?? ""
+            pid = Int32(pidText) ?? 0
+            if pid > 0 { break }
+            Thread.sleep(forTimeInterval: 0.01)
+        } while ProcessInfo.processInfo.systemUptime < readyDeadline
+        ok(pid > 0, "CmdCaptureTask: descendant pipeline starts")
+        running.cancel()
+        ok(finished.wait(timeout: .now() + 1.5) == .success, "CmdCaptureTask: cancellation of TERM-refusing pipeline is bounded")
+        ok(pid > 0 && kill(pid, 0) == -1 && errno == ESRCH, "CmdCaptureTask: cancelled shell is reaped")
     }
-    let readyDeadline = ProcessInfo.processInfo.systemUptime + 2
-    while !FileManager.default.fileExists(atPath: ready) && ProcessInfo.processInfo.systemUptime < readyDeadline {
-        Thread.sleep(forTimeInterval: 0.01)
-    }
-    ok(FileManager.default.fileExists(atPath: ready), "CmdCaptureTask: descendant pipeline starts")
-    running.cancel()
-    ok(finished.wait(timeout: .now() + 1.5) == .success, "CmdCaptureTask: cancellation of TERM-refusing pipeline is bounded")
-    let pidText = (try? String(contentsOfFile: ready, encoding: .utf8)) ?? ""
-    let pid = Int32(pidText) ?? 0
-    ok(pid > 0 && kill(pid, 0) == -1 && errno == ESRCH, "CmdCaptureTask: cancelled shell is reaped")
     Thread.sleep(forTimeInterval: 0.8)
     ok(!FileManager.default.fileExists(atPath: late), "CmdCaptureTask: cancelled descendants cannot write later")
 
