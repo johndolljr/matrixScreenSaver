@@ -5,6 +5,7 @@ func wallpaperAppTests() {
     wallpaperIconTests()
     wallpaperSyncMenuTests()
     wallpaperDeferredLaunchTests()
+    wallpaperBackgroundFailureTests()
     let suite = "MatrixWallpaperPlaybackTests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -141,6 +142,16 @@ func wallpaperAppTests() {
     wait(0.1)
     let optionsWindow = NSApp.windows.first { $0.isVisible && !($0 is DesktopWindow) && $0.canBecomeKey }
     check(optionsWindow != nil, "Options opens a normal native window while stopped")
+    let saverOptionsHost = MatrixScreenSaverView(frame: NSRect(x: 0, y: 0, width: 640, height: 360), isPreview: true)!
+    let saverOptionsWindow = saverOptionsHost.configureSheet
+    let saverOptionsController: MatrixScreenSaverOptionsSheetController? = stored("optionsSheetController", in: saverOptionsHost)
+    let wallpaperOptionsController: MatrixScreenSaverOptionsSheetController? = stored("optionsController", in: host)
+    check(saverOptionsController != nil && wallpaperOptionsController != nil
+          && saverOptionsWindow === saverOptionsController?.configureSheet()
+          && optionsWindow === wallpaperOptionsController?.configureSheet(),
+          "saver and wallpaper both present the shared native options controller")
+    check(saverOptionsWindow?.contentView?.bounds.size == optionsWindow?.contentView?.bounds.size,
+          "saver sheet and wallpaper options window use identical dialog dimensions")
     check(desktopWindowCount() == 0, "opening Options does not start stopped playback")
     optionsWindow?.performClose(nil)
 
@@ -264,6 +275,46 @@ private func wallpaperDeferredLaunchTests() {
     workspace.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
     check(desktopWindowCount() == NSScreen.screens.count && ScreenSyncCoordinator.shared.registeredCount == NSScreen.screens.count,
           "resuming deferred launch starts one session using the current displays")
+}
+
+/// A desktop without readable originals must not block animation or lose its wallpaper.
+private func wallpaperBackgroundFailureTests() {
+    let suite = "MatrixWallpaperBackgroundFailureTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let desktop = DesktopWallpaperFixture()
+    desktop.unreadable = ["first"]
+    let controller = desktop.controller()
+    let host = WallpaperApp(defaults: defaults, desktopWallpaper: controller)
+    var alerts = 0
+    // Dismiss a regression's modal alert so the failing test cannot hang waiting for a click.
+    let dismissAlert = Timer(timeInterval: 0.02, repeats: true) { _ in
+        guard let window = NSApp.modalWindow else { return }
+        alerts += 1
+        NSApp.abortModal()
+        window.orderOut(nil)
+    }
+    RunLoop.main.add(dismissAlert, forMode: .default)
+    RunLoop.main.add(dismissAlert, forMode: .modalPanel)
+    defer {
+        dismissAlert.invalidate()
+        host.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+    }
+    host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    check(eventually(10) { desktopWindowCount() == NSScreen.screens.count },
+          "an unreadable original wallpaper does not block animation on any display")
+    check(alerts == 0 && NSApp.modalWindow == nil,
+          "failure to set the black background is logged without a modal alert")
+    check(desktop.images["first"]?.url.path == "/original-a.jpg"
+          && desktop.images["second"]?.url == controller.blackImageURL,
+          "a display without a saved original stays untouched while other backgrounds turn black")
+    NSApp.sendAction(NSSelectorFromString("togglePlayback:"), to: host, from: nil)
+    check(desktop.images["second"]?.url.path == "/original-b.jpg",
+          "Stop restores saved backgrounds after a partial black-background failure")
+    desktop.unreadable = []
+    NSApp.sendAction(NSSelectorFromString("togglePlayback:"), to: host, from: nil)
+    check(desktop.images.values.allSatisfy { $0.url == controller.blackImageURL },
+          "a later Start retries the background once its original is readable")
 }
 
 /// Ensures a failed restore cannot block Quit and stale entries cannot replace a newer choice.

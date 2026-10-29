@@ -304,10 +304,12 @@ final class WallpaperApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             let message = error.localizedDescription
             NSLog("Matrix Wallpaper desktop image: %@", message)
+            // Black is cosmetic; keep animation running without hiding restore failures.
+            guard restoring else { return }
             guard lastWallpaperError != message else { return }
             lastWallpaperError = message
             let alert = NSAlert()
-            alert.messageText = restoring ? "Could not restore the desktop wallpaper" : "Could not set the desktop to black"
+            alert.messageText = "Could not restore the desktop wallpaper"
             alert.informativeText = "\(message)\nSaved wallpaper settings are kept for retry on Stop or the next launch."
             alert.runModal()
         }

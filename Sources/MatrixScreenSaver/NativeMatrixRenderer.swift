@@ -5,7 +5,11 @@ final class NativeMatrixRenderer {
         var neoMessageSceneEnabled = true
         var neoMessageSpeedFactor = 1.0
         var cmdSceneEnabled = false
+        /// Independent custom output typing multiplier.
+        var cmdTypingSpeedFactor = 10.0
         var commands: [String] = []
+        /// Runs every command in list order instead of choosing one per scene entry.
+        var commandsRunInSequence = false
         var numberSceneEnabled = true
         var twinkleEnabled = true
         var diffuseEnabled = true
@@ -28,9 +32,11 @@ final class NativeMatrixRenderer {
                 neoMessageSceneEnabled: neoMessageSceneEnabled,
                 neoMessageSpeedFactor: max(neoMessageSpeedFactor, MatrixRendererLimits.minimumNeoMessageSpeedFactor),
                 cmdSceneEnabled: cmdSceneEnabled,
+                cmdTypingSpeedFactor: cmdTypingSpeedFactor.isFinite && cmdTypingSpeedFactor > 0 ? cmdTypingSpeedFactor : 10,
                 commands: commands
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty },
+                commandsRunInSequence: commandsRunInSequence,
                 numberSceneEnabled: numberSceneEnabled,
                 twinkleEnabled: twinkleEnabled,
                 diffuseEnabled: diffuseEnabled,
@@ -284,10 +290,14 @@ final class NativeMatrixRenderer {
 
     private var neoScene = NeoMessageScene()
     private var cmdScene = CmdCaptureScene()
+    /// Index of the command being revealed during sequential playback.
+    private var commandIndex = 0
     /// The current command's cancellation handle; stopped renderers never own a capture.
     private var cmdCaptureTask: CmdCaptureTask?
     /// Results wait for an active frame so suspension cannot consume their display time.
     private var pendingCmdCaptureOutput: String?
+    /// Last applied live snapshot; unchanged buffers do not rebuild the output rows.
+    private var displayedCmdCaptureOutput: String?
     private let cmdCaptureQueue = DispatchQueue(label: "dev.patsch.MatrixScreenSaver.cmdCapture")
     private var layers = [Layer(), Layer(), Layer()]
     private var renderCells: [RenderCell] = []
@@ -370,13 +380,14 @@ final class NativeMatrixRenderer {
         dirtyRowCount = 0
     }
 
-    /// When in the Neo message blank-between-lines phase, returns cursor visibility;
-    /// otherwise `nil`. The view uses this to draw the cursor directly on-screen
-    /// (bypassing the frame buffer) so it is guaranteed to appear.
-    /// Covers all Neo scene phases: startup delay, typing, pause, and blank.
+    /// Neo cursor drawn directly by both hosts, outside the frame buffer.
     var neoSceneCursor: (column: Int, visible: Bool)? {
-        guard activeScene == .neoMessage, neoScene.phase != .done else { return nil }
-        let state = neoScene.renderState
+        let state: NeoMessageRenderState
+        if activeScene == .neoMessage, neoScene.phase != .done {
+            state = neoScene.renderState
+        } else {
+            return nil
+        }
         let m = Self.numberIntroMargin
         let textCount = state.currentLine.map { min(state.visibleCharCount, $0.unicodeScalars.count) } ?? 0
         return (column: m + textCount, visible: state.cursorVisible)
@@ -413,6 +424,7 @@ final class NativeMatrixRenderer {
         cmdCaptureTask?.cancel()
         cmdCaptureTask = nil
         pendingCmdCaptureOutput = nil
+        displayedCmdCaptureOutput = nil
     }
 
     /// Excludes paused wall-clock time while retaining cells, random state, and scene progress.
@@ -513,7 +525,9 @@ final class NativeMatrixRenderer {
             rows > 0 &&
             (previousConfiguration.neoMessageSceneEnabled != sanitizedConfiguration.neoMessageSceneEnabled ||
              previousConfiguration.cmdSceneEnabled != sanitizedConfiguration.cmdSceneEnabled ||
+             previousConfiguration.cmdTypingSpeedFactor != sanitizedConfiguration.cmdTypingSpeedFactor ||
              previousConfiguration.commands != sanitizedConfiguration.commands ||
+             previousConfiguration.commandsRunInSequence != sanitizedConfiguration.commandsRunInSequence ||
              previousConfiguration.numberSceneEnabled != sanitizedConfiguration.numberSceneEnabled ||
              previousConfiguration.neoMessageLines != sanitizedConfiguration.neoMessageLines)
 
@@ -648,59 +662,9 @@ final class NativeMatrixRenderer {
         return blackoutRounds
     }
 
-    /// Skips the "Call trans opt / Trace program" typed lines and drops straight into the
-    /// number-rain trace, using whatever is already on screen (the held cmd output) as the
-    /// starting frame so it reads as a dissolve rather than a hard cut.
-    private func beginNumberRainFromCmd() {
-        activeScene = .numberIntro
-        numberSceneRNG = Xorshift64(seed: sceneSeed &+ 2)
-        numberIntroAnchor = Date.timeIntervalSinceReferenceDate
-        numberIntroSchedule = NumberIntroSchedule(
-            typingText: "",
-            cursorBlinkEnd: 0,
-            charTimings: [],
-            typingEnd: 0,
-            pause1Duration: 0,
-            pause1End: 0,
-            pause2Duration: 0,
-            rainStart: 0,
-            blackoutRounds: computeBlackoutRounds(rng: &numberSceneRNG)
-        )
-        numberIntroPhase = .rain
-        numberIntroRainFrame = 0
-        numberIntroBlackoutCount = 0
-        numberIntroBlackedColumns = []
-        dissolveCmdOutputIntoNumberRain()
-        markAllRowsDirty()
-    }
-
-    /// Replaces the currently-visible cmd output glyphs with random digits in place, and
-    /// fills the remaining blank content rows with random digits — a single-frame "dissolve"
-    /// from the captured text into the number rain that follows. Cells that held visible
-    /// cmd text stay at full brightness/bold so the previous text shape briefly reads
-    /// through the new digits.
-    private func dissolveCmdOutputIntoNumberRain() {
-        let m = Self.numberIntroMargin
-        guard rows > m * 2, columns > m * 2 else { return }
-        let levelCount = max(levelColors.count, 1)
-        let rowStart = m; let rowEnd = rows - m
-        let colStart = m; let colEnd = columns - m
-        for row in rowStart..<rowEnd {
-            let offset = row * columns
-            for col in colStart..<colEnd {
-                let wasVisible = renderCells[offset + col].isVisible
-                renderCells[offset + col] = RenderCell(
-                    scalar: randomNumberGlyph(),
-                    foregroundLevel: wasVisible ? levelCount : numberRainLevel(levelCount: levelCount),
-                    backgroundLevel: 0,
-                    bold: wasVisible
-                )
-            }
-            visibleCountByRow[row] = colEnd - colStart
-        }
-    }
-
-    private func initNumberIntroScene() {
+    /// Initializes full trace content; custom playback supplies a fresh clock without changing shared content.
+    /// - Parameter playbackAnchor: Trace playback start after custom output, or the original Neo-only anchor.
+    private func initNumberIntroScene(playbackAnchor: TimeInterval? = nil) {
         numberSceneRNG = Xorshift64(seed: sceneSeed &+ 2)
 
         // Anchor: sceneStartTime + however long the Neo scene takes at the configured speed.
@@ -708,7 +672,7 @@ final class NativeMatrixRenderer {
         let neoWallDuration: TimeInterval = configuration.neoMessageSceneEnabled
             ? neoScene.scheduledDuration
             : 0
-        numberIntroAnchor = sceneStartTime + neoWallDuration
+        numberIntroAnchor = playbackAnchor ?? (sceneStartTime + neoWallDuration)
 
         let cursorBlinkEnd = Double(Self.numberIntroCursorBlinkCount * 2) * Self.numberIntroCursorBlinkPeriod
 
@@ -876,10 +840,8 @@ final class NativeMatrixRenderer {
         visibleCountByRow[m] = col - colStart
     }
 
-    /// Writes plain text into an arbitrary content row, respecting the shared margin.
-    /// Unlike `setRow0` this takes no cursor/typed-count animation state — used for
-    /// instantly revealing a full line, such as a captured cmd output row.
-    private func setRow(_ row: Int, text: String) {
+    /// Writes a visible output row and optional block cursor within the content margins.
+    private func setRow(_ row: Int, text: String, showCursor: Bool) {
         let m = Self.numberIntroMargin
         guard row >= 0, row < rows, columns > m * 2 else { return }
         let baseGreenLevel = max(levelColors.count / 2, 1)
@@ -893,6 +855,12 @@ final class NativeMatrixRenderer {
             renderCells[offset + col] = RenderCell(scalar: scalars[i], foregroundLevel: baseGreenLevel,
                                           backgroundLevel: 0, bold: false)
             col += 1
+        }
+        if showCursor {
+            let cursorColumn = min(col, colEnd - 1)
+            renderCells[offset + cursorColumn] = RenderCell(scalar: UnicodeScalar(0x2588)!, foregroundLevel: baseGreenLevel,
+                                                           backgroundLevel: 0, bold: false)
+            col = max(col, cursorColumn + 1)
         }
         visibleCountByRow[row] = col - colStart
     }
@@ -1048,13 +1016,11 @@ final class NativeMatrixRenderer {
         }
     }
 
-    /// Moves from the cmd capture scene to the next scene in the sequence. Skips the typed
-    /// "Call trans opt / Trace program" lines and dissolves the cmd output straight into the
-    /// number-rain trace instead, since by this point the operator has already read the
-    /// captured output.
+    /// Starts full trace typing after custom messages clear, excluding capture runtime from its clock.
     private func transitionFromCmdCapture() {
         if configuration.numberSceneEnabled {
-            beginNumberRainFromCmd()
+            activeScene = .numberIntro
+            initNumberIntroScene(playbackAnchor: Date.timeIntervalSinceReferenceDate)
         } else {
             beginRainScene()
             stepRainFrame()
@@ -1077,15 +1043,20 @@ final class NativeMatrixRenderer {
         // Xorshift64's first output is poorly mixed for numerically close seeds, so the
         // seed is passed through a splitmix64-style finalizer first to decorrelate it.
         var commandPickerRNG = Xorshift64(seed: Self.mixSeed(sceneSeed &+ 5))
-        let command = configuration.commands.randomElement(using: &commandPickerRNG) ?? ""
+        let command = configuration.commandsRunInSequence
+            ? configuration.commands[commandIndex]
+            : configuration.commands.randomElement(using: &commandPickerRNG) ?? ""
 
-        cmdScene.reset(startTime: Date.timeIntervalSinceReferenceDate, command: command)
+        cmdScene.reset(startTime: Date.timeIntervalSinceReferenceDate, command: command,
+                       speedFactor: configuration.cmdTypingSpeedFactor)
         guard cmdScene.phase != .done else { return }
 
         let task = CmdCaptureTask()
         cmdCaptureTask = task
+        let size = TerminalSize(columns: max(columns - Self.numberIntroMargin * 2, 1),
+                                rows: max(rows - Self.numberIntroMargin * 2, 1))
         cmdCaptureQueue.async { [weak self] in
-            let output = task.captureOutput(command: command)
+            let output = task.captureOutput(command: command, timeout: nil, size: size)
             DispatchQueue.main.async {
                 guard let self, self.running, self.cmdCaptureTask === task else { return }
                 self.pendingCmdCaptureOutput = output
@@ -1099,23 +1070,33 @@ final class NativeMatrixRenderer {
         if let output = pendingCmdCaptureOutput {
             pendingCmdCaptureOutput = nil
             let m = Self.numberIntroMargin
-            // Leave the bottom margin outside the later Number-scene dissolve.
-            cmdScene.receiveCapture(output, maxLines: max(rows - m * 2 - 1, 1),
+            cmdScene.receiveCapture(output, maxLines: max(rows - m * 2, 1),
                                     maxColumns: max(columns - m * 2, 1), now: now)
+        } else if let output = cmdCaptureTask?.outputSnapshot, output != displayedCmdCaptureOutput {
+            displayedCmdCaptureOutput = output
+            let m = Self.numberIntroMargin
+            cmdScene.receiveCapture(output, maxLines: max(rows - m * 2, 1),
+                                    maxColumns: max(columns - m * 2, 1), now: now, isComplete: false)
         }
         cmdScene.advance(now: now)
         let state = cmdScene.renderState
-        let m = Self.numberIntroMargin
+        for i in renderCells.indices { renderCells[i] = Self.blankRenderCell }
+        for i in visibleCountByRow.indices { visibleCountByRow[i] = 0 }
         if let statusLine = state.statusLine {
-            setRow0(text: statusLine, typedCount: statusLine.unicodeScalars.count, showCursor: true)
+            setRow0(text: statusLine, typedCount: statusLine.unicodeScalars.count, showCursor: state.cursorVisible)
         } else {
-            setRow0(text: "", typedCount: 0, showCursor: false)
-            for (index, line) in state.lines.prefix(state.visibleLineCount).enumerated() {
-                setRow(m + 1 + index, text: line)
+            for (index, line) in state.lines.enumerated() {
+                setRow(Self.numberIntroMargin + index, text: line,
+                       showCursor: state.cursorVisible && index == state.lines.count - 1)
             }
         }
         markAllRowsDirty()
         if cmdScene.phase == .done {
+            if configuration.commandsRunInSequence && commandIndex + 1 < configuration.commands.count {
+                commandIndex += 1
+                beginCmdCaptureScene()
+                return
+            }
             if configuration.skipSyncDelay {
                 transitionFromCmdCapture()
             } else {
@@ -1127,6 +1108,7 @@ final class NativeMatrixRenderer {
     /// Chooses and initializes the first scene for the current session.
     private func beginSceneSequence() {
         cancelCmdCapture()
+        commandIndex = 0
         neoSceneDoneRequested = false
         cmdSceneDoneRequested = false
         numberSceneDoneRequested = false

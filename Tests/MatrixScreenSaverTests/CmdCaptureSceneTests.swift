@@ -23,30 +23,72 @@ func cmdCaptureSceneTests() {
     ok(scene.phase == .launching, "CmdCaptureScene: command resets to launching phase")
     ok(scene.scheduledDuration == nil, "CmdCaptureScene: scheduledDuration is nil while launching")
 
-    scene.receiveCapture("line 1\nline 2\nline 3\n", maxLines: 2, maxColumns: 50, now: 101.0)
-    ok(scene.phase == .revealing, "CmdCaptureScene: receiveCapture transitions to revealing phase")
-    ok(scene.lines.count == 2, "CmdCaptureScene: receiveCapture caps lines to maxLines")
-    ok(scene.lines == ["line 1", "line 2"], "CmdCaptureScene: receiveCapture parses output correctly")
-    ok(scene.scheduledDuration != nil, "CmdCaptureScene: scheduledDuration is populated after capture")
-
-    scene.advance(now: 101.0)
-    ok(scene.visibleLineCount == 1, "CmdCaptureScene: first line reveals immediately")
+    scene.receiveCapture("abcdef\n\nsecond\nthird\n", maxLines: 2, maxColumns: 3, now: 101)
+    ok(scene.lines == ["abc", "", "sec", "thi"],
+       "CmdCaptureScene: clips width, preserves blank rows and retains output beyond screen height")
+    ok(scene.renderState.lines == [""], "CmdCaptureScene: starts with an empty typing row")
+    scene.advance(now: 101.13)
+    ok(scene.renderState.lines == ["abc"], "CmdCaptureScene: types the first clipped row")
+    scene.advance(now: 101.17)
+    ok(scene.renderState.lines == ["abc", ""], "CmdCaptureScene: appends instead of clearing between rows")
+    scene.advance(now: 101.25)
+    ok(scene.renderState.lines == ["", "s"], "CmdCaptureScene: scrolls only the top row off when viewport fills")
     scene.shiftTimeline(by: 20)
-    scene.advance(now: 121.08)
-    ok(scene.visibleLineCount == 2 && scene.phase == .revealing, "CmdCaptureScene: suspension preserves progressive reveal")
-    scene.advance(now: 121.2)
-    ok(scene.phase == .holding, "CmdCaptureScene: holds after revealing all lines")
-    scene.shiftTimeline(by: -20)
+    scene.advance(now: 121.25)
+    ok(scene.renderState.lines == ["", "s"], "CmdCaptureScene: suspension preserves partially typed scrolling output")
+    scene.advance(now: 122)
+    ok(scene.renderState.lines == ["sec", "thi"], "CmdCaptureScene: final screen retains the last rows during hold")
+    scene.advance(now: 130)
+    ok(scene.phase == .done && scene.renderState.lines.isEmpty, "CmdCaptureScene: finishes after final hold")
+    let duration = scene.scheduledDuration!
+    scene.reset(startTime: 100, command: "next", speedFactor: 100)
+    ok(scene.renderState.lines.isEmpty && scene.lines.isEmpty, "CmdCaptureScene: new command clears prior output")
+    scene.receiveCapture("abcdef\n\nsecond\nthird\n", maxLines: 2, maxColumns: 3, now: 101)
+    ok(scene.scheduledDuration! < duration, "CmdCaptureScene: independent custom speed accelerates output")
 
     var emptyOutputScene = CmdCaptureScene()
     emptyOutputScene.reset(startTime: 100.0, command: "true")
     emptyOutputScene.receiveCapture("", maxLines: 10, maxColumns: 50, now: 101.0)
     ok(emptyOutputScene.lines == ["(no output)"], "CmdCaptureScene: empty output falls back to placeholder")
 
-    // Advance past reveal and hold
-    let totalDuration = scene.scheduledDuration ?? 0
-    scene.advance(now: 100.0 + totalDuration + 1.0)
-    ok(scene.phase == .done, "CmdCaptureScene: advance past hold duration transitions to done")
+    var live = CmdCaptureScene()
+    live.reset(startTime: 100, command: "stream", speedFactor: 1)
+    live.receiveCapture("one\n", maxLines: 2, maxColumns: 20, now: 101, isComplete: false)
+    live.advance(now: 120)
+    ok(live.phase == .presenting && live.renderState.lines == ["one"] && live.scheduledDuration == nil,
+       "CmdCaptureScene: an idle live command keeps its visible rows without completing")
+    live.receiveCapture("one\ntwo\n", maxLines: 2, maxColumns: 20, now: 121, isComplete: false)
+    ok(live.renderState.lines == ["one"], "CmdCaptureScene: idle time does not pretype newly arriving output")
+    live.advance(now: 121.2)
+    ok(live.renderState.lines == ["one", "two"], "CmdCaptureScene: later output appends without retyping earlier rows")
+    live.receiveCapture("one\ntwo\n", maxLines: 2, maxColumns: 20, now: 130)
+    live.advance(now: 131)
+    ok(live.phase == .presenting, "CmdCaptureScene: final hold starts at command exit, not first output")
+    live.advance(now: 133)
+    ok(live.phase == .done, "CmdCaptureScene: completes only after exit and final hold")
+    live.reset(startTime: 100, command: "partial stream")
+    live.receiveCapture("a", maxLines: 2, maxColumns: 20, now: 101, isComplete: false)
+    live.advance(now: 110)
+    live.receiveCapture("ab", maxLines: 2, maxColumns: 20, now: 111, isComplete: false)
+    ok(live.renderState.lines == ["a"], "CmdCaptureScene: an unterminated row does not bank typing progress for its next character")
+    live.advance(now: 111.05)
+    ok(live.renderState.lines == ["ab"], "CmdCaptureScene: a partial-line update types only newly arrived characters")
+    live.reset(startTime: 100, command: "cursor")
+    ok(live.renderState.cursorVisible, "CmdCaptureScene: waiting for output starts with a visible cursor")
+    live.advance(now: 100.55)
+    ok(!live.renderState.cursorVisible, "CmdCaptureScene: waiting cursor blinks at the Neo cadence")
+    live.receiveCapture("a\nb\nc", maxLines: 2, maxColumns: 20, now: 100.6, isComplete: false)
+    live.advance(now: 101.1)
+    ok(live.renderState.lines == ["b", "c"] && live.renderState.cursorVisible,
+       "CmdCaptureScene: scrolling output retains its blinking cursor")
+    live.shiftTimeline(by: 20)
+    live.advance(now: 121.1)
+    ok(live.renderState.cursorVisible, "CmdCaptureScene: suspension preserves the cursor blink phase")
+    live.advance(now: 121.6)
+    ok(!live.renderState.cursorVisible, "CmdCaptureScene: output cursor continues blinking while the command is idle")
+    live.receiveCapture("a\nb\nc", maxLines: 2, maxColumns: 20, now: 122)
+    live.advance(now: 125)
+    ok(!live.renderState.cursorVisible, "CmdCaptureScene: completion removes the cursor")
 
     cmdCaptureTaskTests()
 }
@@ -67,9 +109,32 @@ func cmdCaptureTaskTests() {
     ok(CmdCaptureTask().captureOutput(command: "printf bad > '\(marker)'\0ignored").isEmpty && !FileManager.default.fileExists(atPath: marker),
        "CmdCaptureTask: embedded NUL cannot execute a truncated command")
 
-    ok(CmdCaptureTask().captureOutput(command: "printf 'hello\\n'; printf 'diagnostic' >&2") == "hello\n", "CmdCaptureTask: stdout takes priority")
-    ok(CmdCaptureTask().captureOutput(command: "printf '  '; printf 'diagnostic' >&2; exit 1") == "diagnostic", "CmdCaptureTask: stderr fallback survives nonzero exit")
+    ok(CmdCaptureTask().captureOutput(command: "printf 'hello\\n'; printf 'diagnostic' >&2") == "hello\ndiagnostic", "CmdCaptureTask: stdout and stderr appear together in terminal order")
+    ok(CmdCaptureTask().captureOutput(command: "printf '  '; printf 'diagnostic' >&2; exit 1") == "  diagnostic", "CmdCaptureTask: diagnostic output survives nonzero exit")
     ok(CmdCaptureTask().captureOutput(command: "printf '%s' \"$HOME\"") == (ProcessInfo.processInfo.environment["HOME"] ?? ""), "CmdCaptureTask: inherits host HOME")
+    let dimensions = CmdCaptureTask().captureOutput(command: "printf '%s %s ' \"$COLUMNS\" \"$LINES\"; stty size",
+                                                    size: TerminalSize(columns: 37, rows: 9))
+    ok(dimensions == "37 9 9 37\n", "CmdCaptureTask: shell environment and native terminal report the viewport dimensions")
+    ok(CmdCaptureTask().captureOutput(command: "printf before; /bin/cat; printf after", timeout: 1) == "beforeafter",
+        "CmdCaptureTask: size-aware stdin returns EOF instead of blocking unattended readers")
+    ok(CmdCaptureTask().captureOutput(command: "test -t 1 && test -t 2 && printf terminal") == "terminal",
+       "CmdCaptureTask: both output streams are terminals so line-buffered programs flush promptly")
+    let ping = CmdCaptureTask()
+    let pingFinished = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        _ = ping.captureOutput(command: "/sbin/ping -c 14 127.0.0.1", timeout: nil)
+        pingFinished.signal()
+    }
+    let pingDeadline = ProcessInfo.processInfo.systemUptime + 1.5
+    while ping.outputSnapshot?.contains("icmp_seq=0") != true && ProcessInfo.processInfo.systemUptime < pingDeadline {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    ok(ping.outputSnapshot?.contains("icmp_seq=0") == true && pingFinished.wait(timeout: .now()) == .timedOut,
+       "CmdCaptureTask: real ping replies are observable before ping exits")
+    ok(pingFinished.wait(timeout: .now() + 16) == .success && ping.outputSnapshot?.contains("14 packets transmitted") == true,
+       "CmdCaptureTask: live ping runs beyond the former twelve-second limit and finishes with statistics")
+    ok(CmdCaptureTask().captureOutput(command: "printf partial; sleep 2", timeout: 0.1) == "partial",
+       "CmdCaptureTask: a bounded capture preserves partial output on timeout")
 
     let reusable = CmdCaptureTask()
     _ = reusable.captureOutput(command: "true")
@@ -83,7 +148,7 @@ func cmdCaptureTaskTests() {
 
     let flood = "(/usr/bin/head -c 262144 /dev/zero | /usr/bin/tr '\\000' x) & /usr/bin/head -c 262144 /dev/zero | /usr/bin/tr '\\000' e >&2; wait"
     let large = CmdCaptureTask().captureOutput(command: flood, timeout: 3)
-    ok(large.utf8.count == 65536 && large.allSatisfy { $0 == "x" }, "CmdCaptureTask: drains simultaneous streams with bounded retained output")
+    ok(large.utf8.count == 65536 && large.allSatisfy { $0 == "x" || $0 == "e" }, "CmdCaptureTask: drains simultaneous streams with bounded combined output")
     let largeError = CmdCaptureTask().captureOutput(command: "/usr/bin/head -c 262144 /dev/zero | /usr/bin/tr '\\000' e >&2", timeout: 3)
     ok(largeError.utf8.count == 65536, "CmdCaptureTask: stderr retention is bounded too")
     let unicodeBoundary = CmdCaptureTask().captureOutput(

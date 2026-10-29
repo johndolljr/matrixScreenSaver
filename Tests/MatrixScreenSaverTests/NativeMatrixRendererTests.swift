@@ -2,6 +2,10 @@ import Foundation
 
 func nativeMatrixRendererTests() {
     commandCaptureLifecycleTests()
+    customTraceHandoffTests()
+    customShellCommandSequenceTests()
+    customScrollingViewportTests()
+    customLiveOutputTests()
     ok(NativeMatrixRenderer().seedOffset == 0,
        "NativeMatrixRenderer: seedOffset defaults to 0")
     var named = NativeMatrixRenderer.Configuration()
@@ -167,7 +171,7 @@ private func commandCaptureLifecycleTests() {
     configuration.commands = ["printf CAPTURE"]
     renderer.updateConfiguration(configuration)
     renderer.start()
-    let row = NativeMatrixRenderer.contentMargin + 1
+    let row = NativeMatrixRenderer.contentMargin
     func displaysCapture() -> Bool {
         let scalars = (0..<40).map { renderer[row, $0].scalar }
         return String(String.UnicodeScalarView(scalars)).contains("CAPTURE")
@@ -193,7 +197,168 @@ private func commandCaptureLifecycleTests() {
     renderer.shiftTimeline(by: Date.timeIntervalSinceReferenceDate - capturePauseStart)
     RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
     renderer.advance()
-    ok(displaysCapture() && !renderer.consumeCmdSceneDone(),
-       "Command capture: completion during suspension gets its full reveal interval on resume")
+    ok(!displaysCapture() && !renderer.consumeCmdSceneDone(),
+        "Command capture: completion during suspension starts with a blank viewport before typing on resume")
     renderer.stop()
+}
+
+/// Custom completion must enter the full trace introduction, with its own playback clock.
+private func customTraceHandoffTests() {
+    let renderer = NativeMatrixRenderer()
+    var configuration = NativeMatrixRenderer.Configuration()
+    configuration.neoMessageSceneEnabled = false
+    configuration.cmdSceneEnabled = true
+    configuration.commands = ["printf CUSTOM"]
+    configuration.numberSceneEnabled = true
+    renderer.updateConfiguration(configuration)
+    renderer.resize(to: TerminalSize(columns: 100, rows: 20))
+    renderer.start()
+    defer { renderer.stop() }
+    var completed = false
+    let deadline = Date(timeIntervalSinceNow: 10)
+    while !completed && Date() < deadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        renderer.advance()
+        completed = renderer.consumeCmdSceneDone()
+    }
+    ok(completed, "Custom trace: custom messages finish before the display barrier")
+    renderer.advanceToNextScene()
+    renderer.advance()
+    let m = NativeMatrixRenderer.contentMargin
+    func firstLine() -> String {
+        String(String.UnicodeScalarView((m..<100).map { renderer[m, $0].scalar }))
+    }
+    ok(!firstLine().contains("CUSTOM") && !(m..<100).contains { renderer[m, $0].scalar.properties.numericType != nil },
+       "Custom trace: handoff clears custom output and begins blinking, not number rain")
+    let typingDeadline = Date(timeIntervalSinceNow: 6)
+    while !firstLine().contains("Call trans opt:") && Date() < typingDeadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        renderer.advance()
+    }
+    ok(firstLine().contains("Call trans opt:"), "Custom trace: full trace first line types after custom completion")
+}
+
+/// Verifies that the native grid consumes output before shell completion.
+private func customLiveOutputTests() {
+    let renderer = NativeMatrixRenderer()
+    var configuration = NativeMatrixRenderer.Configuration()
+    configuration.neoMessageSceneEnabled = false
+    configuration.numberSceneEnabled = false
+    configuration.cmdSceneEnabled = true
+    configuration.cmdTypingSpeedFactor = 100
+    configuration.commands = ["printf 'FIRST\\n'; sleep 1.5; printf 'SECOND\\n'; sleep 0.2"]
+    renderer.updateConfiguration(configuration)
+    renderer.resize(to: TerminalSize(columns: 40, rows: 12))
+    renderer.start()
+    defer { renderer.stop() }
+    let m = NativeMatrixRenderer.contentMargin
+    func row(_ index: Int) -> String {
+        String(String.UnicodeScalarView((m..<(40 - m)).map { renderer[index, $0].scalar }))
+    }
+    let deadline = Date(timeIntervalSinceNow: 1)
+    var first = false
+    var sawCursor = false
+    while !first && Date() < deadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        renderer.advance()
+        first = row(m).hasPrefix("FIRST")
+        if first { sawCursor = row(m).contains("█") }
+    }
+    ok(first && !row(m + 1).contains("SECOND") && !renderer.consumeCmdSceneDone(),
+       "Custom live output: first row appears while the command is still executing")
+    ok(sawCursor, "Custom live output: the current output row includes a full-block cursor")
+    let finalDeadline = Date(timeIntervalSinceNow: 2)
+    while !row(m + 1).hasPrefix("SECOND") && Date() < finalDeadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        renderer.advance()
+    }
+    ok(row(m).hasPrefix("FIRST") && row(m + 1).hasPrefix("SECOND"),
+       "Custom live output: later rows append without clearing earlier output")
+    let cursorDeadline = Date(timeIntervalSinceNow: 1)
+    var movedCursor = false
+    while !movedCursor && Date() < cursorDeadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        renderer.advance()
+        movedCursor = !row(m).contains("█") && row(m + 1).contains("█")
+    }
+    ok(movedCursor, "Custom live output: cursor follows the bottom output row rather than remaining at the top")
+}
+
+/// Checks clipping, scrolling and per-command clearing through the rendered grid.
+private func customScrollingViewportTests() {
+    let renderer = NativeMatrixRenderer()
+    var configuration = NativeMatrixRenderer.Configuration()
+    configuration.neoMessageSceneEnabled = false
+    configuration.numberSceneEnabled = false
+    configuration.cmdSceneEnabled = true
+    configuration.cmdTypingSpeedFactor = 100
+    configuration.commandsRunInSequence = true
+    configuration.commands = ["printf 'first\nsecond\nthird\nlast-wide\n'", "sleep 0.2; printf NEXT"]
+    renderer.updateConfiguration(configuration)
+    renderer.resize(to: TerminalSize(columns: 8, rows: 6))
+    renderer.start()
+    defer { renderer.stop() }
+    let m = NativeMatrixRenderer.contentMargin
+    func row(_ index: Int) -> String {
+        String(String.UnicodeScalarView((m..<(8 - m)).map { renderer[index, $0].scalar }))
+    }
+    var scrolled = false
+    var cleared = false
+    var next = false
+    let deadline = Date(timeIntervalSinceNow: 6)
+    while !next && Date() < deadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        renderer.advance()
+        if row(m) == "thir" && row(m + 1) == "last" { scrolled = true }
+        if scrolled && row(m + 1) == "    " { cleared = true }
+        if row(m) == "NEXT" { next = true }
+    }
+    ok(scrolled, "Custom viewport: last two rows scroll into the native grid with horizontal clipping")
+    ok(cleared && next && row(m + 1) == "    ", "Custom viewport: next command clears every prior output row")
+}
+
+/// Checks command selection through observable shell side effects on each scene entry.
+private func customShellCommandSequenceTests() {
+    let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: output) }
+    let renderer = NativeMatrixRenderer()
+    var configuration = NativeMatrixRenderer.Configuration()
+    configuration.neoMessageSceneEnabled = false
+    configuration.cmdSceneEnabled = true
+    configuration.numberSceneEnabled = false
+    configuration.commands = [
+        "printf A >> '\(output.path)'; sleep 0.15; printf a >> '\(output.path)'",
+        "printf b >> '\(output.path)'",
+        "printf c >> '\(output.path)'",
+    ]
+    configuration.commandsRunInSequence = true
+    renderer.updateConfiguration(configuration)
+    renderer.resize(to: TerminalSize(columns: 40, rows: 20))
+    for cycle in 1...2 {
+        renderer.start()
+        let deadline = Date(timeIntervalSinceNow: 20)
+        var completed = false
+        while !completed && Date() < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            renderer.advance()
+            completed = renderer.consumeCmdSceneDone()
+        }
+        renderer.stop()
+        ok(completed && (try? String(contentsOf: output, encoding: .utf8)) == String(repeating: "Aabc", count: cycle),
+           "Custom shell commands: every scene entry waits for each command and executes all three in order")
+    }
+    try? FileManager.default.removeItem(at: output)
+    configuration.commandsRunInSequence = false
+    renderer.updateConfiguration(configuration)
+    renderer.start()
+    let deadline = Date(timeIntervalSinceNow: 8)
+    var completed = false
+    while !completed && Date() < deadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        renderer.advance()
+        completed = renderer.consumeCmdSceneDone()
+    }
+    renderer.stop()
+    let result = try? String(contentsOf: output, encoding: .utf8)
+    ok(completed && (result == "Aa" || result == "b" || result == "c"), "Custom shell commands: random mode executes only one command")
 }

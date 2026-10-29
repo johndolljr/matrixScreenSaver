@@ -41,18 +41,19 @@ The saver exposes a native **Options…** sheet. The values are stored with `Scr
 | Error rate | Set the factor for the rate of character changes. A non-negative number. | 1.0 |
 | Characters | Restrict rain glyphs to a custom set (e.g. ATGC). Leave empty for the default. | *(empty)* |
 | Neo message scene | Show the Neo message intro before the main scene. | On |
-| Neo message speed | Typing and pause speed multiplier for the Neo message intro. A positive number. | 1.0 |
+| Typing speed | Typing speed multiplier for Neo messages and the trace program. A positive number; message holds keep their natural duration. | 1.0 |
 | Name | Name used in the intro message ("Wake up, {name}..."). Only applies when Neo message lines is empty. | *(empty — uses "Neo")* |
 | Neo message lines | Custom lines typed during the Neo message intro, up to 10 lines / 256 characters each. Leave empty to use the Name-based default message instead. | *(empty)* |
-| cmd capture scene | Run a command and reveal its captured stdout before the trace program (Number scene). Runs after the Neo message and before the Number scene. Skipped entirely if disabled or if no commands are configured. | Off |
-| cmd commands | One shell command per line. A random one runs each time the screen saver starts (all displays in a multi-monitor setup agree on the same pick). Empty disables the scene. | *(empty)* |
+| Show custom scene | Execute custom commands and type live output into consecutive rows as it arrives. Full screens scroll upward; wide rows are clipped without wrapping. Each command clears the screen first. Commands use a size-configured terminal with combined stdout/stderr and receive `COLUMNS`, `LINES`, and `stty size`. No keyboard input is provided. Commands run until exit or cancellation, not a fixed 12-second deadline; use `ping -c 100 google.com` for 100 replies. A command that never exits keeps its scene active until stopped. Displayed output is limited to the first 64 KiB; excess output is drained. Configure commands with **Edit…** in **Intro scenes**. Skipped if disabled or empty; the enabled trace program follows. | Off |
+| Custom typing speed | Independent positive speed multiplier in the custom fieldset. 1 = 25 characters/second; use e.g. 40 for 1,000 characters/second. No pauses between output rows; final output holds briefly. | 10 |
+| command playback | Radio buttons select all commands in sequence or one random command on each scene entry (all displays agree on the random pick). Add, edit, remove, or drag command rows to change their execution order in **Edit…**. Sequence mode finishes each command and its message playback before running the next. | One random command |
 | Scan lines intensity | Opacity of the CRT scan line overlay (0 = off, 100 = fully opaque). | 25 |
 | Scan lines vertical | Orientation of the scan line overlay (vertical or horizontal). | On (vertical) |
 
-Command capture executes your configured commands through `/bin/sh` with the host's permissions.
+Custom shell commands execute through `/bin/sh` with the host's permissions.
 Only enter commands you trust, and avoid sensitive output: it is visible on the screen saver,
-including while the screen is locked. Command text and output are not logged. Each capture has
-a 12-second deadline and retains at most 64 KiB per output stream; stopping or restarting playback
+including while the screen is locked. Command text and output are not logged. Live commands run
+until exit and retain at most 64 KiB of combined output; stopping or restarting playback
 cancels its command. The sandboxed screen saver may not have the same access as the wallpaper app.
 
 ### Wallpaper menubar menu
@@ -66,14 +67,14 @@ cancels its command. The sandboxed screen saver may not have the same access as 
 - Native Swift/AppKit screen saver bundle
 - Edge-to-edge full-screen saver output, with terminal-style chrome kept in the preview host
 - In-process renderer for `rain-forever` with an optional upstream `number` intro
-- Native **Options…** sheet for Number scene, Twinkle, Diffuse, Character size, Rain density, Frame rate, Error rate, Characters, Neo message scene/speed/lines, cmd capture scene/commands, and Scan lines
+- Native **Options…** sheet for Number scene, Twinkle, Diffuse, Character size, Rain density, Frame rate, Error rate, Characters, Neo message scene/speed/lines, custom shell commands/playback, and Scan lines
 - Preview app for fast iteration without reinstalling
 
 ### Repository layout
 
 - `Sources/MatrixScreenSaver/MatrixScreenSaverView.swift` - screen saver view, layout, drawing, and option wiring
 - `Sources/MatrixScreenSaver/NativeMatrixRenderer.swift` - native Matrix scene renderer
-- `Sources/MatrixScreenSaver/CmdCaptureScene.swift` - runs a command, captures its output, and reveals it before the trace program
+- `Sources/MatrixScreenSaver/CmdCaptureScene.swift` - streams command output into scrolling terminal rows before the full trace program
 - `Sources/MatrixScreenSaver/MatrixScreenSaverOptions.swift` - options model and native configure sheet
 - `Sources/MatrixScreenSaver/TerminalSupport.swift` - small shared terminal types used by the active renderer
 - `Scripts/install-saver.sh` - shared ditto-based installer used by local installs

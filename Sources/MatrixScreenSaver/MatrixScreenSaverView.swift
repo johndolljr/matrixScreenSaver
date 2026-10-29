@@ -348,7 +348,8 @@ final class MatrixScreenSaverView: ScreenSaverView {
             } else {
                 startTime = ScreenSyncCoordinator.shared.resolvedStartTime()
             }
-            guard let time = startTime else {
+            // Neo waits internally, but custom commands and rain start as soon as the renderer does.
+            guard let time = startTime, Date.timeIntervalSinceReferenceDate >= time else {
                 sharedFrameBuffer?.refresh()
                 return
             }

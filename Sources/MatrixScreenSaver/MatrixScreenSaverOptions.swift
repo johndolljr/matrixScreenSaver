@@ -8,7 +8,10 @@ struct MatrixScreenSaverOptions: Equatable {
         static let name = "Name"
         static let neoMessageLines = "NeoMessageLines"
         static let cmdSceneEnabled = "CmdSceneEnabled"
+        static let cmdTypingSpeedFactor = "CmdTypingSpeedFactor"
         static let commands = "Commands"
+        /// Preserves random playback for installations without a stored mode.
+        static let commandsRunInSequence = "CommandsRunInSequence"
         static let numberSceneEnabled = "NumberSceneEnabled"
         static let twinkleEnabled = "TwinkleEnabled"
         static let diffuseEnabled = "DiffuseEnabled"
@@ -29,7 +32,11 @@ struct MatrixScreenSaverOptions: Equatable {
     static let defaultName = ""
     static let defaultNeoMessageLines: [String] = []
     static let defaultCmdSceneEnabled = false
+    /// Faster custom output by default without changing Neo or trace typing.
+    static let defaultCmdTypingSpeedFactor = 10.0
     static let defaultCommands: [String] = []
+    /// Existing installations continue choosing one random command.
+    static let defaultCommandsRunInSequence = false
     static let defaultNumberSceneEnabled = true
     static let defaultTwinkleEnabled = true
     static let defaultDiffuseEnabled = true
@@ -60,12 +67,16 @@ struct MatrixScreenSaverOptions: Equatable {
      static let maxCommandLength = 512
 
     static let neoMessageSceneDescription = "Show the Neo message intro. On by default."
-    static let neoMessageSpeedFactorDescription = "Speed multiplier for intro scene typing (Neo message and number scene). Default: 1.0."
+    static let neoMessageSpeedFactorDescription = "Typing speed multiplier for Neo and trace program. Default: 1.0."
+    /// Custom output has no pauses between rows; larger multipliers suit long captures.
+    static let cmdTypingSpeedFactorDescription = "Custom output speed multiplier. 1 = 25 characters/second. Default: 10."
     static let nameDescription = "Name used in the intro message (\"Wake up, {name}...\"). Empty = Neo."
     static let neoMessageLinesDescription = "Lines typed during the Neo message intro (0–10, max 256 chars). Leave empty to use the Name-based default message."
-    static let cmdSceneDescription = "Run a trusted shell command before the trace program. Off by default. Commands run with the host's permissions; output is visible even while the screen is locked."
-    static let commandsDescription = "One shell command per line (up to 20, 512 characters each). Overlong commands are ignored. A random one runs each time the screen saver starts. Empty disables the scene."
-    static let numberSceneDescription = "Show the startup number scene. On by default."
+    static let cmdSceneDescription = "Execute custom commands and show its output as messages. Off by default."
+    /// Retained in the editor where users enter commands that execute with host permissions.
+    static let commandsSecurityWarning = "Commands run with the host's permissions; output is visible even while the screen is locked."
+    static let commandsDescription = "One shell command per row (up to 20, 512 characters each). Drag rows to change execution order. Overlong commands are ignored. Empty disables the scene."
+    static let numberSceneDescription = "Show the trace program intro. On by default."
     static let diffuseDescription = "On by default."
     static let twinkleDescription = "On by default."
     static let characterSizeDescription = "Character cell size in pixels. Default: 16×30."
@@ -87,7 +98,11 @@ struct MatrixScreenSaverOptions: Equatable {
     var name = defaultName
     var neoMessageLines = defaultNeoMessageLines
     var cmdSceneEnabled = defaultCmdSceneEnabled
+    /// Custom output speed, independent of Neo and trace typing.
+    var cmdTypingSpeedFactor = defaultCmdTypingSpeedFactor
     var commands = defaultCommands
+    /// Whether each scene entry runs the whole command list in order.
+    var commandsRunInSequence = defaultCommandsRunInSequence
     var numberSceneEnabled = defaultNumberSceneEnabled
     var twinkleEnabled = defaultTwinkleEnabled
     var diffuseEnabled = defaultDiffuseEnabled
@@ -112,6 +127,8 @@ struct MatrixScreenSaverOptions: Equatable {
         neoMessageSpeedFactor != previous.neoMessageSpeedFactor || neoMessageLines != previous.neoMessageLines ||
         (neoMessageLines.isEmpty && name != previous.name) ||
         cmdSceneEnabled != previous.cmdSceneEnabled || commands != previous.commands ||
+        cmdTypingSpeedFactor != previous.cmdTypingSpeedFactor ||
+        commandsRunInSequence != previous.commandsRunInSequence ||
         numberSceneEnabled != previous.numberSceneEnabled ||
         rainRunForever != previous.rainRunForever || rainDurationSeconds != previous.rainDurationSeconds
     }
@@ -122,7 +139,9 @@ struct MatrixScreenSaverOptions: Equatable {
             neoMessageSceneEnabled: neoMessageSceneEnabled,
             neoMessageSpeedFactor: neoMessageSpeedFactor,
             cmdSceneEnabled: cmdSceneEnabled,
+            cmdTypingSpeedFactor: cmdTypingSpeedFactor,
             commands: commands,
+            commandsRunInSequence: commandsRunInSequence,
             numberSceneEnabled: numberSceneEnabled,
             twinkleEnabled: twinkleEnabled,
             diffuseEnabled: diffuseEnabled,
@@ -159,7 +178,9 @@ struct MatrixScreenSaverOptions: Equatable {
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             neoMessageLines: sanitizedLines,
             cmdSceneEnabled: cmdSceneEnabled,
+            cmdTypingSpeedFactor: cmdTypingSpeedFactor.isFinite && cmdTypingSpeedFactor > 0 ? cmdTypingSpeedFactor : Self.defaultCmdTypingSpeedFactor,
             commands: sanitizedCommands,
+            commandsRunInSequence: commandsRunInSequence,
             numberSceneEnabled: numberSceneEnabled,
             twinkleEnabled: twinkleEnabled,
             diffuseEnabled: diffuseEnabled,
@@ -197,7 +218,9 @@ struct MatrixScreenSaverOptions: Equatable {
             Keys.name: defaultName,
             Keys.neoMessageLines: defaultNeoMessageLines,
             Keys.cmdSceneEnabled: defaultCmdSceneEnabled,
+            Keys.cmdTypingSpeedFactor: defaultCmdTypingSpeedFactor,
             Keys.commands: defaultCommands,
+            Keys.commandsRunInSequence: defaultCommandsRunInSequence,
             Keys.numberSceneEnabled: defaultNumberSceneEnabled,
             Keys.twinkleEnabled: defaultTwinkleEnabled,
             Keys.diffuseEnabled: defaultDiffuseEnabled,
@@ -222,7 +245,9 @@ struct MatrixScreenSaverOptions: Equatable {
             name: defaults.string(forKey: Keys.name) ?? defaultName,
             neoMessageLines: (defaults.array(forKey: Keys.neoMessageLines) as? [String]) ?? defaultNeoMessageLines,
             cmdSceneEnabled: defaults.bool(forKey: Keys.cmdSceneEnabled),
+            cmdTypingSpeedFactor: defaults.double(forKey: Keys.cmdTypingSpeedFactor),
             commands: (defaults.array(forKey: Keys.commands) as? [String]) ?? defaultCommands,
+            commandsRunInSequence: defaults.bool(forKey: Keys.commandsRunInSequence),
             numberSceneEnabled: defaults.bool(forKey: Keys.numberSceneEnabled),
             twinkleEnabled: defaults.bool(forKey: Keys.twinkleEnabled),
             diffuseEnabled: defaults.bool(forKey: Keys.diffuseEnabled),
@@ -247,7 +272,9 @@ struct MatrixScreenSaverOptions: Equatable {
         defaults.set(options.name, forKey: Keys.name)
         defaults.set(options.neoMessageLines, forKey: Keys.neoMessageLines)
         defaults.set(options.cmdSceneEnabled, forKey: Keys.cmdSceneEnabled)
+        defaults.set(options.cmdTypingSpeedFactor, forKey: Keys.cmdTypingSpeedFactor)
         defaults.set(options.commands, forKey: Keys.commands)
+        defaults.set(options.commandsRunInSequence, forKey: Keys.commandsRunInSequence)
         defaults.set(options.numberSceneEnabled, forKey: Keys.numberSceneEnabled)
         defaults.set(options.twinkleEnabled, forKey: Keys.twinkleEnabled)
         defaults.set(options.diffuseEnabled, forKey: Keys.diffuseEnabled)
@@ -270,6 +297,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     NSTableViewDataSource, NSTableViewDelegate {
      private enum ValidationError: LocalizedError {
          case neoMessageSpeedFactor
+         case cmdTypingSpeedFactor
           case rainDensity
            case frameRate
            case errorRate
@@ -278,7 +306,9 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
          var errorDescription: String? {
              switch self {
              case .neoMessageSpeedFactor:
-                 return "Neo message speed must be a positive number."
+                  return "Intro typing speed must be a positive number."
+             case .cmdTypingSpeedFactor:
+                  return "Custom typing speed must be a finite positive number."
              case .rainDensity:
                  return "Rain density must be a positive number."
              case .frameRate:
@@ -299,6 +329,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     private let rootStack = NSStackView()
     private let neoMessageSceneCheckbox = NSButton(checkboxWithTitle: "Show Neo message scene", target: nil, action: nil)
     private let neoMessageSpeedFactorField = NSTextField(string: "")
+    private let cmdTypingSpeedFactorField = NSTextField(string: "")
     private let nameField = NSTextField(string: "")
     private let linesTableView = NSTableView()
     private let linesScrollView = NSScrollView()
@@ -312,10 +343,31 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     private static let removeColumnID = NSUserInterfaceItemIdentifier("remove")
     private var pendingLines: [String] = MatrixScreenSaverOptions.defaultNeoMessageLines
     private var linesEditorWindow: NSWindow?
-    private let cmdSceneCheckbox = NSButton(checkboxWithTitle: "Show command capture scene", target: nil, action: nil)
-    private let commandsTextView = NSTextView()
-    private let commandsScrollView = NSScrollView()
-    private let numberSceneCheckbox = NSButton(checkboxWithTitle: "Show number scene", target: nil, action: nil)
+    /// The shared list edits only one scene's pending values at a time.
+    private var editingCommands = false
+    /// Describes the active list's limits without sharing its persisted values.
+    private var editorDescriptionLabel: NSTextField?
+    /// Shell warning shown only while editing executable commands.
+    private var editorSecurityWarning: NSTextField?
+    /// Neo-only reset action hidden when editing commands.
+    private let resetLinesButton = NSButton(title: "Reset lines", target: nil, action: nil)
+    /// Commands may be empty; Neo retains at least one editable row.
+    private var minimumEditorRows: Int { editingCommands ? 0 : MatrixScreenSaverOptions.minNeoMessageLineCount }
+    /// Applies each scene's existing storage limit to the shared list.
+    private var maximumEditorRows: Int {
+        editingCommands ? MatrixScreenSaverOptions.maxCommandCount : MatrixScreenSaverOptions.maxNeoMessageLineCount
+    }
+    private let cmdSceneCheckbox = NSButton(checkboxWithTitle: "Show custom scene", target: nil, action: nil)
+    /// Scene-owned editor buttons remain available only while their scene is enabled.
+    private let commandsEditButton = NSButton(title: "Edit…", target: nil, action: nil)
+    private let linesEditButton = NSButton(title: "Edit…", target: nil, action: nil)
+    /// Radio controls share an action and parent so AppKit treats them as one group.
+    private let commandsSequenceRadio = NSButton(radioButtonWithTitle: "In sequence", target: nil, action: nil)
+    /// Selects a single command on every scene entry.
+    private let commandsRandomRadio = NSButton(radioButtonWithTitle: "One random command", target: nil, action: nil)
+    /// Commands accepted in the editor, not persisted until the main dialog is accepted.
+    private var pendingCommands: [String] = []
+    private let numberSceneCheckbox = NSButton(checkboxWithTitle: "Show trace program scene", target: nil, action: nil)
     private let twinkleCheckbox = NSButton(checkboxWithTitle: "Twinkling effect", target: nil, action: nil)
     private let diffuseCheckbox = NSButton(checkboxWithTitle: "Glow effect", target: nil, action: nil)
     private let scanLinesSlider: NSSlider = {
@@ -373,10 +425,13 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     func prepare(using options: MatrixScreenSaverOptions) {
         neoMessageSceneCheckbox.state = options.neoMessageSceneEnabled ? .on : .off
         neoMessageSpeedFactorField.stringValue = Self.format(options.neoMessageSpeedFactor)
+        cmdTypingSpeedFactorField.stringValue = Self.format(options.cmdTypingSpeedFactor)
         nameField.stringValue = options.name
         pendingLines = options.neoMessageLines
         cmdSceneCheckbox.state = options.cmdSceneEnabled ? .on : .off
-        commandsTextView.string = options.commands.joined(separator: "\n")
+        pendingCommands = options.commands
+        commandsSequenceRadio.state = options.commandsRunInSequence ? .on : .off
+        commandsRandomRadio.state = options.commandsRunInSequence ? .off : .on
         numberSceneCheckbox.state = options.numberSceneEnabled ? .on : .off
         twinkleCheckbox.state = options.twinkleEnabled ? .on : .off
         diffuseCheckbox.state = options.diffuseEnabled ? .on : .off
@@ -396,6 +451,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         frameRateField.stringValue = Self.format(options.frameRate)
         errorRateField.stringValue = Self.format(options.errorRate)
         charactersField.stringValue = options.characters
+        updateSceneControls()
         sizeWindowToFitContent()
     }
 
@@ -449,6 +505,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
          characterSizeSlider.target = self
          characterSizeSlider.action = #selector(characterSizeSliderChanged(_:))
          neoMessageSpeedFactorField.formatter = Self.numberFormatter
+         cmdTypingSpeedFactorField.formatter = Self.numberFormatter
+         cmdTypingSpeedFactorField.delegate = self
          rainDensityField.formatter = Self.numberFormatter
          rainDurationField.formatter = Self.integerFormatter
          frameRateField.formatter = Self.numberFormatter
@@ -460,6 +518,10 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
          errorRateField.delegate = self
          rainRunForeverCheckbox.target = self
          rainRunForeverCheckbox.action = #selector(rainRunForeverCheckboxChanged(_:))
+        for checkbox in [neoMessageSceneCheckbox, cmdSceneCheckbox, numberSceneCheckbox] {
+            checkbox.target = self
+            checkbox.action = #selector(sceneCheckboxChanged(_:))
+        }
 
         rootStack.orientation = .vertical
         rootStack.alignment = .leading
@@ -473,7 +535,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         aboutButton.contentTintColor = .linkColor
         aboutButton.font = .systemFont(ofSize: 13)
 
-        let tabs = NSTabView()
+        // Tab pages lay out during insertion, before Auto Layout sizes the tab view.
+        let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: 520, height: 520))
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabs.addTabViewItem(makeOptionsTab(title: "General", views: [
             makeCharacterSizeSection(),
@@ -481,15 +544,14 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
             makeNumericSection(title: "Frame rate", field: frameRateField, description: MatrixScreenSaverOptions.frameRateDescription),
         ]))
         tabs.addTabViewItem(makeOptionsTab(title: "Intro scenes", views: [
-            makeCheckboxSection(checkbox: neoMessageSceneCheckbox, description: MatrixScreenSaverOptions.neoMessageSceneDescription),
-            makeTextSection(title: "Name", field: nameField, description: MatrixScreenSaverOptions.nameDescription, fieldWidth: Self.textFieldWidth / 2),
-            makeNeoMessageLinesButtonRow(),
-            makeCheckboxSection(checkbox: numberSceneCheckbox, description: MatrixScreenSaverOptions.numberSceneDescription),
+            makeSceneGroup(views: [
+                makeCheckboxSection(checkbox: neoMessageSceneCheckbox, description: MatrixScreenSaverOptions.neoMessageSceneDescription),
+                makeTextSection(title: "Name", field: nameField, description: MatrixScreenSaverOptions.nameDescription, fieldWidth: Self.textFieldWidth / 2),
+                makeNeoMessageLinesButtonRow(),
+            ]),
+            makeSceneGroup(views: [makeCustomShellCommandsSection()]),
+            makeSceneGroup(views: [makeCheckboxSection(checkbox: numberSceneCheckbox, description: MatrixScreenSaverOptions.numberSceneDescription)]),
             makeNumericSection(title: "Typing speed", field: neoMessageSpeedFactorField, description: MatrixScreenSaverOptions.neoMessageSpeedFactorDescription),
-        ]))
-        tabs.addTabViewItem(makeOptionsTab(title: "Command capture", views: [
-            makeCheckboxSection(checkbox: cmdSceneCheckbox, description: MatrixScreenSaverOptions.cmdSceneDescription),
-            makeMultilineTextSection(title: "Commands", textView: commandsTextView, scrollView: commandsScrollView, description: MatrixScreenSaverOptions.commandsDescription),
         ]))
         tabs.addTabViewItem(makeOptionsTab(title: "Rain", views: [
              makeCheckboxSection(checkbox: twinkleCheckbox, description: MatrixScreenSaverOptions.twinkleDescription),
@@ -505,7 +567,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         // Keep every page the same size so switching tabs never moves the dialog buttons.
         NSLayoutConstraint.activate([
             tabs.widthAnchor.constraint(equalToConstant: 520),
-            tabs.heightAnchor.constraint(equalToConstant: 460),
+            tabs.heightAnchor.constraint(equalToConstant: 520),
             tabs.widthAnchor.constraint(equalTo: rootStack.widthAnchor, constant: groupWidth),
         ])
 
@@ -577,6 +639,86 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         sizeWindowToFitContent()
     }
 
+    /// Wraps scene controls in a native, untitled fieldset without changing their actions.
+    private func makeSceneGroup(views: [NSView]) -> NSBox {
+        let box = NSBox()
+        box.titlePosition = .noTitle
+        box.contentViewMargins = NSSize(width: 8, height: 8)
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let content = box.contentView!
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        for view in views {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        return box
+    }
+
+    /// Refreshes editable controls without changing the scene's retained values or enable toggle.
+    private func updateSceneControls() {
+        cmdTypingSpeedFactorField.isEnabled = cmdSceneCheckbox.state == .on
+        nameField.isEnabled = neoMessageSceneCheckbox.state == .on
+        linesEditButton.isEnabled = neoMessageSceneCheckbox.state == .on
+        for control in [commandsEditButton, commandsSequenceRadio, commandsRandomRadio] {
+            control.isEnabled = cmdSceneCheckbox.state == .on
+        }
+    }
+
+    /// Keeps fieldset enablement in sync with the scene toggles.
+    @objc private func sceneCheckboxChanged(_ sender: NSButton) {
+        updateSceneControls()
+    }
+
+    /// Groups shell command controls at their position in the intro sequence.
+    private func makeCustomShellCommandsSection() -> NSView {
+        commandsEditButton.target = self
+        commandsEditButton.action = #selector(editCommands(_:))
+        commandsEditButton.setAccessibilityLabel("Edit custom shell commands")
+        let label = NSTextField(labelWithString: "Commands")
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        let heading = NSStackView(views: [label, commandsEditButton])
+        heading.spacing = 12
+        for radio in [commandsSequenceRadio, commandsRandomRadio] {
+            radio.target = self
+            radio.action = #selector(commandModeChanged(_:))
+        }
+        let modes = NSStackView(views: [commandsSequenceRadio, commandsRandomRadio])
+        modes.spacing = 12
+        let stack = NSStackView(views: [
+            makeCheckboxSection(checkbox: cmdSceneCheckbox, description: MatrixScreenSaverOptions.cmdSceneDescription),
+            heading, modes,
+            makeNumericSection(title: "Typing speed", field: cmdTypingSpeedFactorField,
+                               description: MatrixScreenSaverOptions.cmdTypingSpeedFactorDescription),
+        ])
+        cmdTypingSpeedFactorField.setAccessibilityLabel("Custom typing speed")
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        return stack
+    }
+
+    /// Keeps the command playback choices mutually exclusive.
+    @objc private func commandModeChanged(_ sender: NSButton) {
+        commandsSequenceRadio.state = sender === commandsSequenceRadio ? .on : .off
+        commandsRandomRadio.state = sender === commandsRandomRadio ? .on : .off
+    }
+
+    /// Opens a separate editor without changing the commands accepted by the main dialog.
+    @objc private func editCommands(_ sender: Any?) {
+        editingCommands = true
+        openListEditor()
+    }
+
     /// Builds the simple "Neo message lines [Edit…]" row shown in the main sheet.
     private func makeNeoMessageLinesButtonRow() -> NSView {
         let stack = NSStackView()
@@ -595,18 +737,19 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.widthAnchor.constraint(equalToConstant: 100).isActive = true
 
-        let editButton = NSButton(title: "Edit…", target: self, action: #selector(editLines(_:)))
-        editButton.setContentHuggingPriority(.required, for: .horizontal)
+        linesEditButton.target = self
+        linesEditButton.action = #selector(editLines(_:))
+        linesEditButton.setContentHuggingPriority(.required, for: .horizontal)
 
         row.addArrangedSubview(label)
-        row.addArrangedSubview(editButton)
+        row.addArrangedSubview(linesEditButton)
 
         stack.addArrangedSubview(row)
         stack.addArrangedSubview(makeDescriptionLabel(MatrixScreenSaverOptions.neoMessageLinesDescription))
         return stack
     }
 
-    /// Builds the secondary Neo message lines editor window (presented as a sheet).
+    /// Builds the shared, reorderable scene list editor presented as a sheet.
     private func buildLinesEditorWindow() -> NSWindow {
         let editorWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
@@ -662,7 +805,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         linesEditorAddButton = NSButton(title: "+", target: self, action: #selector(addLine(_:)))
         linesEditorAddButton.bezelStyle = .rounded
 
-        let resetLinesButton = NSButton(title: "Reset lines", target: self, action: #selector(resetLines(_:)))
+        resetLinesButton.target = self
+        resetLinesButton.action = #selector(resetLines(_:))
         let cancelLinesButton = NSButton(title: "Cancel", target: self, action: #selector(cancelLines(_:)))
         let okLinesButton = NSButton(title: "OK", target: self, action: #selector(applyLines(_:)))
         okLinesButton.keyEquivalent = "\r"
@@ -692,13 +836,22 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
         editorStack.addArrangedSubview(linesScrollView)
         editorStack.addArrangedSubview(linesEditorAddButton)
-        editorStack.addArrangedSubview(makeDescriptionLabel(MatrixScreenSaverOptions.neoMessageLinesDescription))
+        let description = makeDescriptionLabel("")
+        let warning = makeDescriptionLabel(MatrixScreenSaverOptions.commandsSecurityWarning)
+        editorDescriptionLabel = description
+        editorSecurityWarning = warning
+        editorStack.addArrangedSubview(description)
+        editorStack.addArrangedSubview(warning)
         editorStack.addArrangedSubview(footer)
 
         linesScrollView.widthAnchor.constraint(equalTo: editorStack.widthAnchor,
             constant: -(editorStack.edgeInsets.left + editorStack.edgeInsets.right)).isActive = true
         footer.widthAnchor.constraint(equalTo: editorStack.widthAnchor,
             constant: -(editorStack.edgeInsets.left + editorStack.edgeInsets.right)).isActive = true
+        for label in [description, warning] {
+            label.widthAnchor.constraint(equalTo: linesScrollView.widthAnchor).isActive = true
+        }
+        linesScrollView.widthAnchor.constraint(equalToConstant: 460).isActive = true
 
         let contentView = NSView()
         contentView.translatesAutoresizingMaskIntoConstraints = false
@@ -717,9 +870,22 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
     /// Opens the lines editor as a sheet over the main options window.
     @objc private func editLines(_ sender: Any?) {
+        editingCommands = false
+        openListEditor()
+    }
+
+    /// Loads the selected scene's values without committing edits from the previous sheet.
+    private func openListEditor() {
         let editor = linesEditorWindow ?? buildLinesEditorWindow()
         linesEditorWindow = editor
-        editorLines = pendingLines
+        editor.title = editingCommands ? "Custom Shell Commands" : "Neo Message Lines"
+        editorDescriptionLabel?.stringValue = editingCommands
+            ? MatrixScreenSaverOptions.commandsDescription : MatrixScreenSaverOptions.neoMessageLinesDescription
+        editorSecurityWarning?.isHidden = !editingCommands
+        resetLinesButton.isHidden = editingCommands
+        linesTableView.setAccessibilityLabel(editingCommands ? "Custom commands" : "Neo message lines")
+        linesEditorAddButton.setAccessibilityLabel(editingCommands ? "Add command" : "Add message")
+        editorLines = editingCommands ? pendingCommands : pendingLines
         linesTableView.reloadData()
         refreshLinesSection()
         window.beginSheet(editor)
@@ -727,16 +893,23 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
     /// Commits the editor lines and closes the editor sheet.
     @objc private func applyLines(_ sender: Any?) {
+        linesEditorWindow?.makeFirstResponder(nil)
         flushEditorLines()
-        pendingLines = editorLines
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .map { String($0.prefix(MatrixScreenSaverOptions.maxNeoMessageLineLength)) }
+        if editingCommands {
+            // Never truncate shell syntax into a different executable command; sanitize on main Apply.
+            pendingCommands = editorLines
+        } else {
+            pendingLines = editorLines
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .map { String($0.prefix(MatrixScreenSaverOptions.maxNeoMessageLineLength)) }
+        }
         window.endSheet(linesEditorWindow ?? window)
     }
 
     /// Discards editor changes and closes the editor sheet.
     @objc private func cancelLines(_ sender: Any?) {
+        linesEditorWindow?.makeFirstResponder(nil)
         window.endSheet(linesEditorWindow ?? window)
     }
 
@@ -752,7 +925,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
     /// Adds a new empty line to the editor table.
     @objc private func addLine(_ sender: Any?) {
-        guard editorLines.count < MatrixScreenSaverOptions.maxNeoMessageLineCount else { return }
+        guard editorLines.count < maximumEditorRows else { return }
         flushEditorLines()
         editorLines.append("")
         linesTableView.reloadData()
@@ -766,7 +939,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     /// Removes the row whose "−" button was tapped.
     @objc private func removeLine(_ sender: NSButton) {
         let row = linesTableView.row(for: sender)
-        guard row >= 0, editorLines.count > MatrixScreenSaverOptions.minNeoMessageLineCount else { return }
+        guard row >= 0, editorLines.count > minimumEditorRows else { return }
         flushEditorLines()
         editorLines.remove(at: row)
         linesTableView.reloadData()
@@ -783,9 +956,9 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     /// Updates button states and resizes the editor window to fit current row count.
     private func refreshLinesSection() {
         let count = editorLines.count
-        linesEditorAddButton.isEnabled = count < MatrixScreenSaverOptions.maxNeoMessageLineCount
-        // Resize scroll view height to show all rows without a scrollbar
-        let tableHeight = CGFloat(count) * (Self.lineRowHeight + linesTableView.intercellSpacing.height)
+        linesEditorAddButton.isEnabled = count < maximumEditorRows
+        linesScrollView.hasVerticalScroller = count > 10
+        let tableHeight = CGFloat(max(1, min(count, 10))) * (Self.lineRowHeight + linesTableView.intercellSpacing.height)
         if let constraint = linesScrollHeightConstraint {
             constraint.constant = tableHeight
         } else {
@@ -821,15 +994,17 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
                    validateDrop info: any NSDraggingInfo,
                    proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        return dropOperation == .above ? .move : []
+        return info.draggingSource as? NSTableView === tableView && dropOperation == .above ? .move : []
     }
 
     func tableView(_ tableView: NSTableView,
                    acceptDrop info: any NSDraggingInfo,
                    row: Int,
                    dropOperation: NSTableView.DropOperation) -> Bool {
-        guard let srcStr = info.draggingPasteboard.string(forType: Self.dragPboardType),
-              let srcRow = Int(srcStr) else { return false }
+        guard info.draggingSource as? NSTableView === tableView, dropOperation == .above,
+              let srcStr = info.draggingPasteboard.string(forType: Self.dragPboardType),
+              let srcRow = Int(srcStr), editorLines.indices.contains(srcRow),
+              (0...editorLines.count).contains(row) else { return false }
         flushEditorLines()
         let item = editorLines.remove(at: srcRow)
         let dest = srcRow < row ? row - 1 : row
@@ -871,9 +1046,9 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
                 cellView.identifier = identifier
                 let field = NSTextField(string: "")
                 field.isEditable = true
+                field.delegate = self
                 field.isBordered = false
                 field.drawsBackground = false
-                field.font = .systemFont(ofSize: 13)
                 field.translatesAutoresizingMaskIntoConstraints = false
                 cellView.addSubview(field)
                 cellView.textField = field
@@ -884,13 +1059,16 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
                 ])
             }
             cellView.textField?.stringValue = editorLines[row]
+            cellView.textField?.font = editingCommands ? .monospacedSystemFont(ofSize: 12, weight: .regular) : .systemFont(ofSize: 13)
+            cellView.textField?.setAccessibilityLabel(editingCommands ? "Command \(row + 1)" : "Message \(row + 1)")
             return cellView
 
         case Self.removeColumnID:
             let btn = NSButton(title: "−", target: self, action: #selector(removeLine(_:)))
             btn.bezelStyle = .rounded
             btn.font = .systemFont(ofSize: 13)
-            btn.isEnabled = editorLines.count > MatrixScreenSaverOptions.minNeoMessageLineCount
+            btn.isEnabled = editorLines.count > minimumEditorRows
+            btn.setAccessibilityLabel(editingCommands ? "Remove command \(row + 1)" : "Remove message \(row + 1)")
             return btn
 
         default:
@@ -900,6 +1078,23 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         Self.lineRowHeight
+    }
+
+    /// Saves edits before scrolling recycles a row's text field.
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        let row = linesTableView.row(for: field)
+        guard editorLines.indices.contains(row) else { return }
+        editorLines[row] = field.stringValue
+    }
+
+    /// Prevents AppKit's text substitutions from rewriting executable shell syntax.
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        guard editingCommands, let field = notification.object as? NSTextField,
+              let editor = field.currentEditor() as? NSTextView else { return }
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
     }
 
     /// Builds the scan lines slider row with a live percentage label.
@@ -1019,38 +1214,6 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         row.addArrangedSubview(field)
 
         stack.addArrangedSubview(row)
-        stack.addArrangedSubview(makeDescriptionLabel(description))
-        return stack
-    }
-
-    /// Builds a labeled multi-line text input (one entry per line) with its description.
-    private func makeMultilineTextSection(title: String, textView: NSTextView, scrollView: NSScrollView, description: String) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 4
-        stack.setHuggingPriority(.required, for: .vertical)
-
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
-
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        textView.isRichText = false
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.setAccessibilityLabel(title)
-        textView.textContainerInset = NSSize(width: 6, height: 6)
-
-        scrollView.documentView = textView
-        scrollView.hasVerticalScroller = true
-        scrollView.borderType = .bezelBorder
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.heightAnchor.constraint(equalToConstant: 90).isActive = true
-
-        stack.addArrangedSubview(label)
-        stack.addArrangedSubview(scrollView)
-        scrollView.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(makeDescriptionLabel(description))
         return stack
     }
@@ -1184,6 +1347,10 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         let sizeIndex = Int(characterSizeSlider.doubleValue.rounded())
         let sizePair = MatrixScreenSaverOptions.characterSizePairs[sizeIndex]
          let neoMessageSpeedFactor = try parseDouble(from: neoMessageSpeedFactorField, error: .neoMessageSpeedFactor)
+         let cmdTypingSpeedFactor = try parseDouble(from: cmdTypingSpeedFactorField, error: .cmdTypingSpeedFactor)
+         guard cmdTypingSpeedFactor.isFinite, cmdTypingSpeedFactor > 0 else {
+             throw ValidationError.cmdTypingSpeedFactor
+         }
          let rainDensity = try parseDouble(from: rainDensityField, error: .rainDensity)
          let rainDurationSeconds = try parseInteger(from: rainDurationField, error: .rainDurationSeconds)
          let frameRate = try parseDouble(from: frameRateField, error: .frameRate)
@@ -1211,8 +1378,9 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
             name: nameField.stringValue,
             neoMessageLines: pendingLines,
             cmdSceneEnabled: cmdSceneCheckbox.state == .on,
-            commands: commandsTextView.string
-                .components(separatedBy: .newlines),
+            cmdTypingSpeedFactor: cmdTypingSpeedFactor,
+             commands: pendingCommands,
+             commandsRunInSequence: commandsSequenceRadio.state == .on,
             numberSceneEnabled: numberSceneCheckbox.state == .on,
             twinkleEnabled: twinkleCheckbox.state == .on,
             diffuseEnabled: diffuseCheckbox.state == .on,
