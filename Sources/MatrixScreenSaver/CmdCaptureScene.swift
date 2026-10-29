@@ -248,8 +248,8 @@ final class CmdCaptureTask {
         let existingComponents = Set(existingPath.split(separator: ":").map(String.init))
         environment["PATH"] = (Self.extraPathDirectories.filter { !existingComponents.contains($0) } + [existingPath])
             .filter { !$0.isEmpty }.joined(separator: ":")
-        let arguments = ["/bin/sh", "-c", command].map { strdup($0) }
-        let variables = environment.map { strdup("\($0.key)=\($0.value)") }
+        let arguments = ["/bin/sh", "-c", command].map { $0.withCString { strdup($0) } }
+        let variables = environment.map { "\($0.key)=\($0.value)".withCString { strdup($0) } }
         defer { (arguments + variables).forEach { free($0) } }
         var argv = arguments + [nil]
         var envp = variables + [nil]
