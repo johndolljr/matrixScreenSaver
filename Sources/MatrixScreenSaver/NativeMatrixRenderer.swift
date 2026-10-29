@@ -219,7 +219,6 @@ final class NativeMatrixRenderer {
     private static let numberIntroCursorBlinkPeriod: TimeInterval = 0.5   // matches NeoMessageScene
     private static let numberIntroCursorBlinkCount = 2                    // 4 half-periods × 0.5 s ≈ 2 s
     private static let numberIntroTypingInterval: TimeInterval = 1.0 / 40.0
-    private static let numberIntroRainFrames = 160
     private static let numberIntroBlackoutInterval: TimeInterval = 1.0
     private static let numberIntroBlackoutRounds = 10
     private static let numberIntroMargin = 2
@@ -335,6 +334,7 @@ final class NativeMatrixRenderer {
 
     private var numberIntroPhase: NumberIntroPhase = .cursorBlink
     private var numberIntroCursorVisible = false
+    /// Completed trace row shifts at the reference rate, independent of host FPS.
     private var numberIntroRainFrame = 0
     private var sceneStartTime: TimeInterval = 0   // 5-second-quantised anchor — shared across displays
     /// Immutable session date keeps scripted text identical when displays cross a phase barrier around a pause.
@@ -737,7 +737,6 @@ final class NativeMatrixRenderer {
             }
             if numberIntroPhase == previousPhase { break }
         }
-        markAllRowsDirty()
     }
 
     private func stepCursorBlink(sceneTime: TimeInterval) {
@@ -810,34 +809,22 @@ final class NativeMatrixRenderer {
             }
         }
         guard activeScene == .numberIntro && !numberSceneDoneRequested else { return }
-        scrollNumberRain()
-        self.now += 1
+        let expectedFrame = Int(max(0, sceneTime - numberIntroSchedule.rainStart) * Self.referenceFrameRate)
+        // Higher host FPS must not accelerate whole-row scrolling or repeat unchanged frames.
+        while numberIntroRainFrame < expectedFrame {
+            scrollNumberRain()
+            numberIntroRainFrame += 1
+            self.now += 1
+        }
     }
 
     /// Writes cursor / typed text into row 0 of the render grid.
     /// Writes cursor / typed text into the content area top-left (row m, col m).
     private func setRow0(text: String, typedCount: Int, showCursor: Bool) {
         let m = Self.numberIntroMargin
-        guard rows > m, columns > m else { return }
-        let baseGreenLevel = max(levelColors.count / 2, 1)
-        let scalars = Array(text.unicodeScalars)
-        let offset = m * columns
-        let colStart = m
-        let colEnd = columns - m
-        for col in colStart..<colEnd { renderCells[offset + col] = Self.blankRenderCell }
-        var col = colStart
-        for i in 0..<min(typedCount, scalars.count) {
-            guard col < colEnd else { break }
-            renderCells[offset + col] = RenderCell(scalar: scalars[i], foregroundLevel: baseGreenLevel,
-                                          backgroundLevel: 0, bold: false)
-            col += 1
-        }
-        if showCursor, col < colEnd {
-            renderCells[offset + col] = RenderCell(scalar: UnicodeScalar(0x2588)!, foregroundLevel: baseGreenLevel,
-                                          backgroundLevel: 0, bold: false)
-            col += 1
-        }
-        visibleCountByRow[m] = col - colStart
+        let visibleText = String(String.UnicodeScalarView(text.unicodeScalars.prefix(typedCount)))
+        setRow(m, text: visibleText,
+               showCursor: showCursor && visibleText.unicodeScalars.count < columns - m * 2)
     }
 
     /// Writes a visible output row and optional block cursor within the content margins.
@@ -849,20 +836,24 @@ final class NativeMatrixRenderer {
         let offset = row * columns
         let colStart = m
         let colEnd = columns - m
-        for col in colStart..<colEnd { renderCells[offset + col] = Self.blankRenderCell }
-        var col = colStart
-        for i in 0..<min(scalars.count, colEnd - colStart) {
-            renderCells[offset + col] = RenderCell(scalar: scalars[i], foregroundLevel: baseGreenLevel,
-                                          backgroundLevel: 0, bold: false)
-            col += 1
+        let textCount = min(scalars.count, colEnd - colStart)
+        let cursorColumn = min(colStart + textCount, colEnd - 1)
+        for col in colStart..<colEnd {
+            let index = col - colStart
+            var cell = Self.blankRenderCell
+            if showCursor && col == cursorColumn {
+                cell = RenderCell(scalar: UnicodeScalar(0x2588)!, foregroundLevel: baseGreenLevel,
+                                  backgroundLevel: 0, bold: false)
+            } else if index < textCount {
+                cell = RenderCell(scalar: scalars[index], foregroundLevel: baseGreenLevel,
+                                  backgroundLevel: 0, bold: false)
+            }
+            if renderCells[offset + col] != cell {
+                renderCells[offset + col] = cell
+                markRowDirty(row)
+            }
         }
-        if showCursor {
-            let cursorColumn = min(col, colEnd - 1)
-            renderCells[offset + cursorColumn] = RenderCell(scalar: UnicodeScalar(0x2588)!, foregroundLevel: baseGreenLevel,
-                                                           backgroundLevel: 0, bold: false)
-            col = max(col, cursorColumn + 1)
-        }
-        visibleCountByRow[row] = col - colStart
+        visibleCountByRow[row] = max(textCount, showCursor ? cursorColumn - colStart + 1 : 0)
     }
 
     /// Instantly fills rows m+1..rows-m-1 with random numbers; row m stays empty.
@@ -901,6 +892,7 @@ final class NativeMatrixRenderer {
             let src = (row - 1) * columns
             for col in colStart..<colEnd { renderCells[dst + col] = renderCells[src + col] }
             visibleCountByRow[row] = visibleCountByRow[row - 1]
+            markRowDirty(row)
         }
         let newTopOffset = rowStart * columns
         for col in colStart..<colEnd {
@@ -914,6 +906,7 @@ final class NativeMatrixRenderer {
                 backgroundLevel: 0, bold: false)
         }
         visibleCountByRow[rowStart] = colEnd - colStart
+        markRowDirty(rowStart)
     }
 
     /// Blacks out ~10 % of content columns: clears rows m+1..rowEnd, shows indicator at row m.
@@ -924,6 +917,9 @@ final class NativeMatrixRenderer {
         let chosen = numberIntroSchedule.blackoutRounds[numberIntroBlackoutCount]
         let colStart = m; let colEnd = columns - m
         let rowStart = m + 1; let rowEnd = rows - m
+        if !chosen.isEmpty {
+            for row in m..<rowEnd { markRowDirty(row) }
+        }
         for col in chosen {
             for row in rowStart..<rowEnd { renderCells[row * columns + col] = Self.blankRenderCell }
             renderCells[m * columns + col] = RenderCell(
@@ -986,12 +982,14 @@ final class NativeMatrixRenderer {
 
     /// Advances the Neo message intro scene by one simulation step.
     private func stepNeoMessageFrame() {
+        let previousCursorVisible = neoScene.renderState.cursorVisible
         neoScene.advance(now: Date.timeIntervalSinceReferenceDate)
         let state = neoScene.renderState
         // Never write the cursor to the frame buffer — the view draws it directly
         // via neoSceneCursor so it is guaranteed to appear in every phase.
         setRow0(text: state.currentLine ?? "", typedCount: state.visibleCharCount, showCursor: false)
-        markAllRowsDirty()
+        // Neo's cursor is composited outside the grid, but still needs a published frame.
+        if state.cursorVisible != previousCursorVisible { markRowDirty(Self.numberIntroMargin) }
         if neoScene.phase == .done {
             if configuration.skipSyncDelay {
                 // Preview context: self-transition immediately
@@ -1080,17 +1078,17 @@ final class NativeMatrixRenderer {
         }
         cmdScene.advance(now: now)
         let state = cmdScene.renderState
-        for i in renderCells.indices { renderCells[i] = Self.blankRenderCell }
-        for i in visibleCountByRow.indices { visibleCountByRow[i] = 0 }
         if let statusLine = state.statusLine {
             setRow0(text: statusLine, typedCount: statusLine.unicodeScalars.count, showCursor: state.cursorVisible)
         } else {
-            for (index, line) in state.lines.enumerated() {
-                setRow(Self.numberIntroMargin + index, text: line,
+            let m = Self.numberIntroMargin
+            for row in m..<max(m, rows - m) {
+                let index = row - m
+                let line = index < state.lines.count ? state.lines[index] : ""
+                setRow(row, text: line,
                        showCursor: state.cursorVisible && index == state.lines.count - 1)
             }
         }
-        markAllRowsDirty()
         if cmdScene.phase == .done {
             if configuration.commandsRunInSequence && commandIndex + 1 < configuration.commands.count {
                 commandIndex += 1

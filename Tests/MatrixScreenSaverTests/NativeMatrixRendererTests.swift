@@ -6,6 +6,8 @@ func nativeMatrixRendererTests() {
     customShellCommandSequenceTests()
     customScrollingViewportTests()
     customLiveOutputTests()
+    introDirtyRowTests()
+    traceFrameRateTests()
     ok(NativeMatrixRenderer().seedOffset == 0,
        "NativeMatrixRenderer: seedOffset defaults to 0")
     var named = NativeMatrixRenderer.Configuration()
@@ -131,6 +133,84 @@ func nativeMatrixRendererTests() {
     ok(String(String.UnicodeScalarView(earlyText)).contains(expectedText) && earlyText == lateText,
        "NativeMatrixRenderer: pause between display phase advances preserves identical Number-scene timestamps")
     ok(earlyText == startupText, "NativeMatrixRenderer: a display starting after resume keeps the same scripted content and seed")
+}
+
+/// Checks idle intro frames and cursor-only updates through the host's dirty-row contract.
+private func introDirtyRowTests() {
+    for neo in [true, false] {
+        let renderer = NativeMatrixRenderer()
+        var configuration = NativeMatrixRenderer.Configuration()
+        configuration.neoMessageSceneEnabled = neo
+        configuration.neoMessageLines = ["X"]
+        configuration.neoMessageSpeedFactor = 1000
+        renderer.updateConfiguration(configuration)
+        renderer.resize(to: TerminalSize(columns: 40, rows: 12))
+        renderer.overrideSceneStartTime = Date.timeIntervalSinceReferenceDate
+        renderer.start()
+        defer { renderer.stop() }
+        renderer.shiftTimeline(by: -0.1)
+        renderer.advance()
+        renderer.clearDirtyRows()
+        renderer.shiftTimeline(by: -0.1)
+        ok(!renderer.advance() && !(0..<12).contains(where: renderer.isRowDirty),
+           "Intro redraw: \(neo ? "Neo" : "trace") skips an unchanged pause frame")
+        renderer.shiftTimeline(by: -0.4)
+        ok(renderer.advance() && (0..<12).filter(renderer.isRowDirty) == [NativeMatrixRenderer.contentMargin],
+           "Intro redraw: \(neo ? "Neo" : "trace") cursor blink invalidates only its text row")
+    }
+
+    let renderer = NativeMatrixRenderer()
+    var configuration = NativeMatrixRenderer.Configuration()
+    configuration.neoMessageSceneEnabled = false
+    configuration.numberSceneEnabled = false
+    configuration.cmdSceneEnabled = true
+    configuration.commands = ["printf X; sleep 2"]
+    renderer.updateConfiguration(configuration)
+    renderer.resize(to: TerminalSize(columns: 40, rows: 12))
+    renderer.start()
+    defer { renderer.stop() }
+    let margin = NativeMatrixRenderer.contentMargin
+    let deadline = Date(timeIntervalSinceNow: 1)
+    while renderer[margin, margin].scalar != "X" && Date() < deadline {
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        renderer.advance()
+    }
+    ok(renderer[margin, margin].scalar == "X", "Intro redraw: live custom output reaches the grid")
+    renderer.clearDirtyRows()
+    renderer.shiftTimeline(by: -0.08)
+    ok(!renderer.advance(), "Intro redraw: idle custom output does not request another frame")
+    renderer.shiftTimeline(by: -0.5)
+    ok(renderer.advance() && (0..<12).filter(renderer.isRowDirty) == [margin],
+       "Intro redraw: custom cursor blink invalidates only its output row")
+}
+
+/// Compares trace grid motion over equal elapsed time at different configured frame rates.
+private func traceFrameRateTests() {
+    var frames: [[NativeMatrixRenderer.RenderCell]] = []
+    for fps in [25.0, 60.0] {
+        let renderer = NativeMatrixRenderer()
+        var configuration = NativeMatrixRenderer.Configuration()
+        configuration.neoMessageSceneEnabled = false
+        configuration.frameRate = fps
+        configuration.twinkleEnabled = false
+        renderer.updateConfiguration(configuration)
+        renderer.resize(to: TerminalSize(columns: 40, rows: 12))
+        renderer.overrideSceneStartTime = Date.timeIntervalSinceReferenceDate
+        renderer.overrideSceneContentStartTime = 1000
+        renderer.start()
+        defer { renderer.stop() }
+        let schedule = Mirror(reflecting: renderer).children.first { $0.label == "numberIntroSchedule" }!.value
+        let rainStart = Mirror(reflecting: schedule).children.first { $0.label == "rainStart" }!.value as! TimeInterval
+        for frame in 0...Int(fps * 0.4) {
+            let anchor = Mirror(reflecting: renderer).children.first { $0.label == "numberIntroAnchor" }!.value as! TimeInterval
+            let target = rainStart + 0.005 + Double(frame) / fps
+            renderer.shiftTimeline(by: Date.timeIntervalSinceReferenceDate - anchor - target)
+            renderer.advance()
+        }
+        frames.append((0..<12).flatMap { row in (0..<40).map { renderer[row, $0] } })
+    }
+    ok(frames[0].contains(where: \.hasForeground), "Trace scrolling: comparison includes visible digits")
+    ok(frames[0] == frames[1], "Trace scrolling: equal elapsed time produces the same grid at 25 and 60 FPS")
 }
 
 /// Exercises command side effects through renderer setup, playback, and teardown.
