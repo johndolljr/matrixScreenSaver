@@ -5,11 +5,13 @@ final class NativeMatrixRenderer {
         var neoMessageSceneEnabled = true
         var neoMessageSpeedFactor = 1.0
         var cmdSceneEnabled = false
-        /// Independent custom output typing multiplier.
-        var cmdTypingSpeedFactor = 10.0
+        /// Seconds to retain each command's output after exit.
+        var cmdOutputHoldSeconds = 10.0
         var commands: [String] = []
         /// Runs every command in list order instead of choosing one per scene entry.
         var commandsRunInSequence = false
+        /// Shuffles the full sequence deterministically for each shared scene seed.
+        var commandsShuffleSequence = false
         var numberSceneEnabled = true
         var twinkleEnabled = true
         var diffuseEnabled = true
@@ -32,11 +34,12 @@ final class NativeMatrixRenderer {
                 neoMessageSceneEnabled: neoMessageSceneEnabled,
                 neoMessageSpeedFactor: max(neoMessageSpeedFactor, MatrixRendererLimits.minimumNeoMessageSpeedFactor),
                 cmdSceneEnabled: cmdSceneEnabled,
-                cmdTypingSpeedFactor: cmdTypingSpeedFactor.isFinite && cmdTypingSpeedFactor > 0 ? cmdTypingSpeedFactor : 10,
+                cmdOutputHoldSeconds: cmdOutputHoldSeconds.isFinite && cmdOutputHoldSeconds >= 0 ? cmdOutputHoldSeconds : 10,
                 commands: commands
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty },
                 commandsRunInSequence: commandsRunInSequence,
+                commandsShuffleSequence: commandsShuffleSequence,
                 numberSceneEnabled: numberSceneEnabled,
                 twinkleEnabled: twinkleEnabled,
                 diffuseEnabled: diffuseEnabled,
@@ -525,9 +528,10 @@ final class NativeMatrixRenderer {
             rows > 0 &&
             (previousConfiguration.neoMessageSceneEnabled != sanitizedConfiguration.neoMessageSceneEnabled ||
              previousConfiguration.cmdSceneEnabled != sanitizedConfiguration.cmdSceneEnabled ||
-             previousConfiguration.cmdTypingSpeedFactor != sanitizedConfiguration.cmdTypingSpeedFactor ||
+             previousConfiguration.cmdOutputHoldSeconds != sanitizedConfiguration.cmdOutputHoldSeconds ||
              previousConfiguration.commands != sanitizedConfiguration.commands ||
              previousConfiguration.commandsRunInSequence != sanitizedConfiguration.commandsRunInSequence ||
+             previousConfiguration.commandsShuffleSequence != sanitizedConfiguration.commandsShuffleSequence ||
              previousConfiguration.numberSceneEnabled != sanitizedConfiguration.numberSceneEnabled ||
              previousConfiguration.neoMessageLines != sanitizedConfiguration.neoMessageLines)
 
@@ -1025,7 +1029,6 @@ final class NativeMatrixRenderer {
         }
     }
 
-    /// Launches one cancellable capture only when this scene enters active playback.
     private func beginCmdCaptureScene() {
         activeScene = .cmdCapture
         guard running else { return }
@@ -1034,23 +1037,32 @@ final class NativeMatrixRenderer {
         for i in visibleCountByRow.indices { visibleCountByRow[i] = 0 }
         markAllRowsDirty()
 
-        // Pick one command from the configured list using a seed derived from the shared
-        // scene seed, so every display in a multi-monitor setup picks the same command,
-        // while a fresh restart cycle (new sceneSeed) is free to pick a different one.
+        // Recreate the same selection/order on every display and command in this cycle.
         // sceneSeed only changes by a few seconds between consecutive launches, and
         // Xorshift64's first output is poorly mixed for numerically close seeds, so the
         // seed is passed through a splitmix64-style finalizer first to decorrelate it.
         var commandPickerRNG = Xorshift64(seed: Self.mixSeed(sceneSeed &+ 5))
+        let commands = configuration.commandsShuffleSequence && configuration.commandsRunInSequence
+            ? configuration.commands.shuffled(using: &commandPickerRNG) : configuration.commands
         let command = configuration.commandsRunInSequence
-            ? configuration.commands[commandIndex]
-            : configuration.commands.randomElement(using: &commandPickerRNG) ?? ""
+            ? commands[commandIndex]
+            : commands.randomElement(using: &commandPickerRNG) ?? ""
 
-        cmdScene.reset(startTime: Date.timeIntervalSinceReferenceDate, command: command,
-                       speedFactor: configuration.cmdTypingSpeedFactor)
-        guard cmdScene.phase != .done else { return }
+        let playbackAnchor = commandIndex == 0
+            ? sceneStartTime + (configuration.neoMessageSceneEnabled ? neoScene.scheduledDuration : 0)
+            : Date.timeIntervalSinceReferenceDate
+        cmdScene.reset(startTime: playbackAnchor, command: command,
+                       speedFactor: configuration.neoMessageSpeedFactor,
+                       seed: sceneSeed &+ UInt64(commandIndex) &+ 5,
+                       holdDuration: configuration.cmdOutputHoldSeconds,
+                       size: TerminalSize(columns: columns - Self.numberIntroMargin * 2,
+                                          rows: rows - Self.numberIntroMargin * 2))
+    }
 
+    private func launchCmdCapture() {
         let task = CmdCaptureTask()
         cmdCaptureTask = task
+        let command = cmdScene.command
         let size = TerminalSize(columns: max(columns - Self.numberIntroMargin * 2, 1),
                                 rows: max(rows - Self.numberIntroMargin * 2, 1))
         cmdCaptureQueue.async { [weak self] in
@@ -1077,17 +1089,16 @@ final class NativeMatrixRenderer {
                                     maxColumns: max(columns - m * 2, 1), now: now, isComplete: false)
         }
         cmdScene.advance(now: now)
+        if cmdScene.phase == .launching && cmdCaptureTask == nil { launchCmdCapture() }
         let state = cmdScene.renderState
-        if let statusLine = state.statusLine {
-            setRow0(text: statusLine, typedCount: statusLine.unicodeScalars.count, showCursor: state.cursorVisible)
-        } else {
-            let m = Self.numberIntroMargin
-            for row in m..<max(m, rows - m) {
-                let index = row - m
-                let line = index < state.lines.count ? state.lines[index] : ""
-                setRow(row, text: line,
-                       showCursor: state.cursorVisible && index == state.lines.count - 1)
-            }
+        let m = Self.numberIntroMargin
+        for row in m..<max(m, rows - m) {
+            let index = row - m
+            let line = index < state.lines.count ? state.lines[index] : ""
+            let commandIsTyping = cmdScene.phase == .typingCommand || cmdScene.phase == .launching
+            setRow(row, text: line,
+                   showCursor: state.cursorVisible && index == state.lines.count - 1
+                       && (!commandIsTyping || line.unicodeScalars.count < columns - m * 2))
         }
         if cmdScene.phase == .done {
             if configuration.commandsRunInSequence && commandIndex + 1 < configuration.commands.count {

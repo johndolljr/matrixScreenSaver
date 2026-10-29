@@ -169,15 +169,16 @@ private func introDirtyRowTests() {
     renderer.resize(to: TerminalSize(columns: 40, rows: 12))
     renderer.start()
     defer { renderer.stop() }
+    renderer.shiftTimeline(by: -20)
+    renderer.advance()
     let margin = NativeMatrixRenderer.contentMargin
     let deadline = Date(timeIntervalSinceNow: 1)
     while renderer[margin, margin].scalar != "X" && Date() < deadline {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
         renderer.advance()
     }
-    ok(renderer[margin, margin].scalar == "X", "Intro redraw: live custom output reaches the grid")
+    ok(renderer[margin, margin].scalar == "X", "Intro redraw: live custom output replaces its command at the top of the grid")
     renderer.clearDirtyRows()
-    renderer.shiftTimeline(by: -0.08)
     ok(!renderer.advance(), "Intro redraw: idle custom output does not request another frame")
     renderer.shiftTimeline(by: -0.5)
     ok(renderer.advance() && (0..<12).filter(renderer.isRowDirty) == [margin],
@@ -233,6 +234,12 @@ private func commandCaptureLifecycleTests() {
        "Command capture: stopped setup and layout never execute commands")
 
     renderer.start()
+    Thread.sleep(forTimeInterval: 0.1)
+    renderer.advance()
+    ok(!FileManager.default.fileExists(atPath: output.path),
+       "Command capture: command typing cannot execute shell side effects early")
+    renderer.shiftTimeline(by: -20)
+    renderer.advance()
     Thread.sleep(forTimeInterval: 0.3)
     renderer.stop()
     ok((try? String(contentsOf: output, encoding: .utf8)) == "x",
@@ -242,6 +249,8 @@ private func commandCaptureLifecycleTests() {
     configuration.commands = ["sleep 0.4; printf x > '\(delayed.path)'"]
     renderer.updateConfiguration(configuration)
     renderer.start()
+    renderer.shiftTimeline(by: -20)
+    renderer.advance()
     Thread.sleep(forTimeInterval: 0.1)
     renderer.stop()
     Thread.sleep(forTimeInterval: 0.6)
@@ -251,6 +260,8 @@ private func commandCaptureLifecycleTests() {
     configuration.commands = ["printf CAPTURE"]
     renderer.updateConfiguration(configuration)
     renderer.start()
+    renderer.shiftTimeline(by: -20)
+    renderer.advance()
     let row = NativeMatrixRenderer.contentMargin
     func displaysCapture() -> Bool {
         let scalars = (0..<40).map { renderer[row, $0].scalar }
@@ -278,7 +289,7 @@ private func commandCaptureLifecycleTests() {
     RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
     renderer.advance()
     ok(!displaysCapture() && !renderer.consumeCmdSceneDone(),
-        "Command capture: completion during suspension starts with a blank viewport before typing on resume")
+        "Command capture: suspension during command typing does not skip to execution on resume")
     renderer.stop()
 }
 
@@ -289,10 +300,13 @@ private func customTraceHandoffTests() {
     configuration.neoMessageSceneEnabled = false
     configuration.cmdSceneEnabled = true
     configuration.commands = ["printf CUSTOM"]
+    configuration.cmdOutputHoldSeconds = 0.1
     configuration.numberSceneEnabled = true
     renderer.updateConfiguration(configuration)
     renderer.resize(to: TerminalSize(columns: 100, rows: 20))
     renderer.start()
+    renderer.shiftTimeline(by: -20)
+    renderer.advance()
     defer { renderer.stop() }
     var completed = false
     let deadline = Date(timeIntervalSinceNow: 10)
@@ -325,11 +339,13 @@ private func customLiveOutputTests() {
     configuration.neoMessageSceneEnabled = false
     configuration.numberSceneEnabled = false
     configuration.cmdSceneEnabled = true
-    configuration.cmdTypingSpeedFactor = 100
+    configuration.neoMessageSpeedFactor = 100
     configuration.commands = ["printf 'FIRST\\n'; sleep 1.5; printf 'SECOND\\n'; sleep 0.2"]
     renderer.updateConfiguration(configuration)
     renderer.resize(to: TerminalSize(columns: 40, rows: 12))
     renderer.start()
+    renderer.shiftTimeline(by: -20)
+    renderer.advance()
     defer { renderer.stop() }
     let m = NativeMatrixRenderer.contentMargin
     func row(_ index: Int) -> String {
@@ -338,7 +354,7 @@ private func customLiveOutputTests() {
     let deadline = Date(timeIntervalSinceNow: 1)
     var first = false
     var sawCursor = false
-    while !first && Date() < deadline {
+    while (!first || !sawCursor) && Date() < deadline {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
         renderer.advance()
         first = row(m).hasPrefix("FIRST")
@@ -371,7 +387,8 @@ private func customScrollingViewportTests() {
     configuration.neoMessageSceneEnabled = false
     configuration.numberSceneEnabled = false
     configuration.cmdSceneEnabled = true
-    configuration.cmdTypingSpeedFactor = 100
+    configuration.neoMessageSpeedFactor = 100
+    configuration.cmdOutputHoldSeconds = 1
     configuration.commandsRunInSequence = true
     configuration.commands = ["printf 'first\nsecond\nthird\nlast-wide\n'", "sleep 0.2; printf NEXT"]
     renderer.updateConfiguration(configuration)
@@ -388,13 +405,14 @@ private func customScrollingViewportTests() {
     let deadline = Date(timeIntervalSinceNow: 6)
     while !next && Date() < deadline {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        renderer.shiftTimeline(by: -0.1)
         renderer.advance()
         if row(m) == "thir" && row(m + 1) == "last" { scrolled = true }
         if scrolled && row(m + 1) == "    " { cleared = true }
         if row(m) == "NEXT" { next = true }
     }
     ok(scrolled, "Custom viewport: last two rows scroll into the native grid with horizontal clipping")
-    ok(cleared && next && row(m + 1) == "    ", "Custom viewport: next command clears every prior output row")
+    ok(cleared && next && row(m + 1) == "    ", "Custom viewport: next command clears prior rows and shows only new output")
 }
 
 /// Checks command selection through observable shell side effects on each scene entry.
@@ -412,6 +430,8 @@ private func customShellCommandSequenceTests() {
         "printf c >> '\(output.path)'",
     ]
     configuration.commandsRunInSequence = true
+    configuration.neoMessageSpeedFactor = 100
+    configuration.cmdOutputHoldSeconds = 0.1
     renderer.updateConfiguration(configuration)
     renderer.resize(to: TerminalSize(columns: 40, rows: 20))
     for cycle in 1...2 {
@@ -420,6 +440,7 @@ private func customShellCommandSequenceTests() {
         var completed = false
         while !completed && Date() < deadline {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            renderer.shiftTimeline(by: -0.1)
             renderer.advance()
             completed = renderer.consumeCmdSceneDone()
         }
@@ -435,10 +456,36 @@ private func customShellCommandSequenceTests() {
     var completed = false
     while !completed && Date() < deadline {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        renderer.shiftTimeline(by: -0.1)
         renderer.advance()
         completed = renderer.consumeCmdSceneDone()
     }
     renderer.stop()
     let result = try? String(contentsOf: output, encoding: .utf8)
     ok(completed && (result == "Aa" || result == "b" || result == "c"), "Custom shell commands: random mode executes only one command")
+    configuration.commandsRunInSequence = true
+    configuration.commandsShuffleSequence = true
+    renderer.updateConfiguration(configuration)
+    var orders: [String] = []
+    for seed in [1000, 1000, 1001, 1002, 1003] {
+        try? FileManager.default.removeItem(at: output)
+        renderer.overrideSceneContentStartTime = Double(seed)
+        renderer.overrideSceneStartTime = Date.timeIntervalSinceReferenceDate
+        renderer.start()
+        let deadline = Date(timeIntervalSinceNow: 12)
+        var completed = false
+        while !completed && Date() < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+            renderer.shiftTimeline(by: -0.1)
+            renderer.advance()
+            completed = renderer.consumeCmdSceneDone()
+        }
+        renderer.stop()
+        let order = (try? String(contentsOf: output, encoding: .utf8)) ?? ""
+        orders.append(order)
+        ok(completed && order.sorted() == Array("Aabc") && order.contains("Aa"),
+           "Shuffled commands: every command runs once and finishes before the next begins")
+    }
+    ok(orders[0] == orders[1], "Shuffled commands: matching display seeds produce the same full order")
+    ok(Set(orders).count > 1, "Shuffled commands: new scene seeds reshuffle the list")
 }

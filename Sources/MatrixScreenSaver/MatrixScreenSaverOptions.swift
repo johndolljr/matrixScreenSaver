@@ -8,10 +8,13 @@ struct MatrixScreenSaverOptions: Equatable {
         static let name = "Name"
         static let neoMessageLines = "NeoMessageLines"
         static let cmdSceneEnabled = "CmdSceneEnabled"
-        static let cmdTypingSpeedFactor = "CmdTypingSpeedFactor"
+        /// Separate key so the retired custom speed cannot become an output hold.
+        static let cmdOutputHoldSeconds = "CmdOutputHoldSeconds"
         static let commands = "Commands"
         /// Preserves random playback for installations without a stored mode.
         static let commandsRunInSequence = "CommandsRunInSequence"
+        /// Optional shuffle for whole-list playback; absent preserves the saved order.
+        static let commandsShuffleSequence = "CommandsShuffleSequence"
         static let numberSceneEnabled = "NumberSceneEnabled"
         static let twinkleEnabled = "TwinkleEnabled"
         static let diffuseEnabled = "DiffuseEnabled"
@@ -32,8 +35,8 @@ struct MatrixScreenSaverOptions: Equatable {
     static let defaultName = ""
     static let defaultNeoMessageLines: [String] = []
     static let defaultCmdSceneEnabled = false
-    /// Faster custom output by default without changing Neo or trace typing.
-    static let defaultCmdTypingSpeedFactor = 10.0
+    /// Post-exit reading time for each custom command.
+    static let defaultCmdOutputHoldSeconds = 10.0
     static let defaultCommands: [String] = []
     /// Existing installations continue choosing one random command.
     static let defaultCommandsRunInSequence = false
@@ -67,14 +70,14 @@ struct MatrixScreenSaverOptions: Equatable {
      static let maxCommandLength = 512
 
     static let neoMessageSceneDescription = "Show the Neo message intro. On by default."
-    static let neoMessageSpeedFactorDescription = "Typing speed multiplier for Neo and trace program. Default: 1.0."
-    /// Custom output has no pauses between rows; larger multipliers suit long captures.
-    static let cmdTypingSpeedFactorDescription = "Custom output speed multiplier. 1 = 25 characters/second. Default: 10."
+    static let neoMessageSpeedFactorDescription = "Typing speed multiplier for Neo, custom commands and trace program. Default: 1.0."
+    /// Output is immediate; this delay only starts after command completion.
+    static let cmdOutputHoldSecondsDescription = "Seconds to keep output visible after the command finishes. 0 advances immediately. Default: 10."
     static let nameDescription = "Name used in the intro message (\"Wake up, {name}...\"). Empty = Neo."
     static let neoMessageLinesDescription = "Lines typed during the Neo message intro (0–10, max 256 chars). Leave empty to use the Name-based default message."
     static let cmdSceneDescription = "Execute custom commands and show its output as messages. Off by default."
     /// Retained in the editor where users enter commands that execute with host permissions.
-    static let commandsSecurityWarning = "Commands run with the host's permissions; output is visible even while the screen is locked."
+    static let commandsSecurityWarning = "Commands run with the host's permissions; commands and output are visible even while the screen is locked."
     static let commandsDescription = "One shell command per row (up to 20, 512 characters each). Drag rows to change execution order. Overlong commands are ignored. Empty disables the scene."
     static let numberSceneDescription = "Show the trace program intro. On by default."
     static let diffuseDescription = "On by default."
@@ -98,11 +101,13 @@ struct MatrixScreenSaverOptions: Equatable {
     var name = defaultName
     var neoMessageLines = defaultNeoMessageLines
     var cmdSceneEnabled = defaultCmdSceneEnabled
-    /// Custom output speed, independent of Neo and trace typing.
-    var cmdTypingSpeedFactor = defaultCmdTypingSpeedFactor
+    /// Seconds to keep completed output visible before the next command or scene.
+    var cmdOutputHoldSeconds = defaultCmdOutputHoldSeconds
     var commands = defaultCommands
     /// Whether each scene entry runs the whole command list in order.
     var commandsRunInSequence = defaultCommandsRunInSequence
+    /// Shuffles whole-list playback once per scene cycle using the shared display seed.
+    var commandsShuffleSequence = false
     var numberSceneEnabled = defaultNumberSceneEnabled
     var twinkleEnabled = defaultTwinkleEnabled
     var diffuseEnabled = defaultDiffuseEnabled
@@ -127,8 +132,9 @@ struct MatrixScreenSaverOptions: Equatable {
         neoMessageSpeedFactor != previous.neoMessageSpeedFactor || neoMessageLines != previous.neoMessageLines ||
         (neoMessageLines.isEmpty && name != previous.name) ||
         cmdSceneEnabled != previous.cmdSceneEnabled || commands != previous.commands ||
-        cmdTypingSpeedFactor != previous.cmdTypingSpeedFactor ||
+        cmdOutputHoldSeconds != previous.cmdOutputHoldSeconds ||
         commandsRunInSequence != previous.commandsRunInSequence ||
+        commandsShuffleSequence != previous.commandsShuffleSequence ||
         numberSceneEnabled != previous.numberSceneEnabled ||
         rainRunForever != previous.rainRunForever || rainDurationSeconds != previous.rainDurationSeconds
     }
@@ -139,9 +145,10 @@ struct MatrixScreenSaverOptions: Equatable {
             neoMessageSceneEnabled: neoMessageSceneEnabled,
             neoMessageSpeedFactor: neoMessageSpeedFactor,
             cmdSceneEnabled: cmdSceneEnabled,
-            cmdTypingSpeedFactor: cmdTypingSpeedFactor,
+            cmdOutputHoldSeconds: cmdOutputHoldSeconds,
             commands: commands,
             commandsRunInSequence: commandsRunInSequence,
+            commandsShuffleSequence: commandsShuffleSequence,
             numberSceneEnabled: numberSceneEnabled,
             twinkleEnabled: twinkleEnabled,
             diffuseEnabled: diffuseEnabled,
@@ -178,9 +185,10 @@ struct MatrixScreenSaverOptions: Equatable {
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             neoMessageLines: sanitizedLines,
             cmdSceneEnabled: cmdSceneEnabled,
-            cmdTypingSpeedFactor: cmdTypingSpeedFactor.isFinite && cmdTypingSpeedFactor > 0 ? cmdTypingSpeedFactor : Self.defaultCmdTypingSpeedFactor,
+            cmdOutputHoldSeconds: cmdOutputHoldSeconds.isFinite && cmdOutputHoldSeconds >= 0 ? cmdOutputHoldSeconds : Self.defaultCmdOutputHoldSeconds,
             commands: sanitizedCommands,
             commandsRunInSequence: commandsRunInSequence,
+            commandsShuffleSequence: commandsShuffleSequence,
             numberSceneEnabled: numberSceneEnabled,
             twinkleEnabled: twinkleEnabled,
             diffuseEnabled: diffuseEnabled,
@@ -218,9 +226,10 @@ struct MatrixScreenSaverOptions: Equatable {
             Keys.name: defaultName,
             Keys.neoMessageLines: defaultNeoMessageLines,
             Keys.cmdSceneEnabled: defaultCmdSceneEnabled,
-            Keys.cmdTypingSpeedFactor: defaultCmdTypingSpeedFactor,
+            Keys.cmdOutputHoldSeconds: defaultCmdOutputHoldSeconds,
             Keys.commands: defaultCommands,
             Keys.commandsRunInSequence: defaultCommandsRunInSequence,
+            Keys.commandsShuffleSequence: false,
             Keys.numberSceneEnabled: defaultNumberSceneEnabled,
             Keys.twinkleEnabled: defaultTwinkleEnabled,
             Keys.diffuseEnabled: defaultDiffuseEnabled,
@@ -245,9 +254,10 @@ struct MatrixScreenSaverOptions: Equatable {
             name: defaults.string(forKey: Keys.name) ?? defaultName,
             neoMessageLines: (defaults.array(forKey: Keys.neoMessageLines) as? [String]) ?? defaultNeoMessageLines,
             cmdSceneEnabled: defaults.bool(forKey: Keys.cmdSceneEnabled),
-            cmdTypingSpeedFactor: defaults.double(forKey: Keys.cmdTypingSpeedFactor),
+            cmdOutputHoldSeconds: defaults.double(forKey: Keys.cmdOutputHoldSeconds),
             commands: (defaults.array(forKey: Keys.commands) as? [String]) ?? defaultCommands,
             commandsRunInSequence: defaults.bool(forKey: Keys.commandsRunInSequence),
+            commandsShuffleSequence: defaults.bool(forKey: Keys.commandsShuffleSequence),
             numberSceneEnabled: defaults.bool(forKey: Keys.numberSceneEnabled),
             twinkleEnabled: defaults.bool(forKey: Keys.twinkleEnabled),
             diffuseEnabled: defaults.bool(forKey: Keys.diffuseEnabled),
@@ -272,9 +282,10 @@ struct MatrixScreenSaverOptions: Equatable {
         defaults.set(options.name, forKey: Keys.name)
         defaults.set(options.neoMessageLines, forKey: Keys.neoMessageLines)
         defaults.set(options.cmdSceneEnabled, forKey: Keys.cmdSceneEnabled)
-        defaults.set(options.cmdTypingSpeedFactor, forKey: Keys.cmdTypingSpeedFactor)
+        defaults.set(options.cmdOutputHoldSeconds, forKey: Keys.cmdOutputHoldSeconds)
         defaults.set(options.commands, forKey: Keys.commands)
         defaults.set(options.commandsRunInSequence, forKey: Keys.commandsRunInSequence)
+        defaults.set(options.commandsShuffleSequence, forKey: Keys.commandsShuffleSequence)
         defaults.set(options.numberSceneEnabled, forKey: Keys.numberSceneEnabled)
         defaults.set(options.twinkleEnabled, forKey: Keys.twinkleEnabled)
         defaults.set(options.diffuseEnabled, forKey: Keys.diffuseEnabled)
@@ -297,7 +308,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     NSTableViewDataSource, NSTableViewDelegate {
      private enum ValidationError: LocalizedError {
          case neoMessageSpeedFactor
-         case cmdTypingSpeedFactor
+          case cmdOutputHoldSeconds
           case rainDensity
            case frameRate
            case errorRate
@@ -307,8 +318,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
              switch self {
              case .neoMessageSpeedFactor:
                   return "Intro typing speed must be a positive number."
-             case .cmdTypingSpeedFactor:
-                  return "Custom typing speed must be a finite positive number."
+             case .cmdOutputHoldSeconds:
+                  return "Output hold must be a finite non-negative number of seconds."
              case .rainDensity:
                  return "Rain density must be a positive number."
              case .frameRate:
@@ -329,7 +340,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     private let rootStack = NSStackView()
     private let neoMessageSceneCheckbox = NSButton(checkboxWithTitle: "Show Neo message scene", target: nil, action: nil)
     private let neoMessageSpeedFactorField = NSTextField(string: "")
-    private let cmdTypingSpeedFactorField = NSTextField(string: "")
+    private let cmdOutputHoldSecondsField = NSTextField(string: "")
     private let nameField = NSTextField(string: "")
     private let linesTableView = NSTableView()
     private let linesScrollView = NSScrollView()
@@ -365,6 +376,8 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     private let commandsSequenceRadio = NSButton(radioButtonWithTitle: "In sequence", target: nil, action: nil)
     /// Selects a single command on every scene entry.
     private let commandsRandomRadio = NSButton(radioButtonWithTitle: "One random command", target: nil, action: nil)
+    /// Runs the complete list in a newly shuffled order for each cycle.
+    private let commandsShuffleRadio = NSButton(radioButtonWithTitle: "All commands in random order", target: nil, action: nil)
     /// Commands accepted in the editor, not persisted until the main dialog is accepted.
     private var pendingCommands: [String] = []
     private let numberSceneCheckbox = NSButton(checkboxWithTitle: "Show trace program scene", target: nil, action: nil)
@@ -425,13 +438,14 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     func prepare(using options: MatrixScreenSaverOptions) {
         neoMessageSceneCheckbox.state = options.neoMessageSceneEnabled ? .on : .off
         neoMessageSpeedFactorField.stringValue = Self.format(options.neoMessageSpeedFactor)
-        cmdTypingSpeedFactorField.stringValue = Self.format(options.cmdTypingSpeedFactor)
+        cmdOutputHoldSecondsField.stringValue = Self.format(options.cmdOutputHoldSeconds)
         nameField.stringValue = options.name
         pendingLines = options.neoMessageLines
         cmdSceneCheckbox.state = options.cmdSceneEnabled ? .on : .off
         pendingCommands = options.commands
-        commandsSequenceRadio.state = options.commandsRunInSequence ? .on : .off
+        commandsSequenceRadio.state = options.commandsRunInSequence && !options.commandsShuffleSequence ? .on : .off
         commandsRandomRadio.state = options.commandsRunInSequence ? .off : .on
+        commandsShuffleRadio.state = options.commandsRunInSequence && options.commandsShuffleSequence ? .on : .off
         numberSceneCheckbox.state = options.numberSceneEnabled ? .on : .off
         twinkleCheckbox.state = options.twinkleEnabled ? .on : .off
         diffuseCheckbox.state = options.diffuseEnabled ? .on : .off
@@ -498,15 +512,15 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
     /// Constructs the native AppKit options sheet content and layout.
     private func buildWindow() {
-        window.title = "MatrixScreenSaver Options"
+        window.title = "Matrix Screen Saver and animated Wallpaper"
         window.isReleasedWhenClosed = false
         window.delegate = self
 
          characterSizeSlider.target = self
          characterSizeSlider.action = #selector(characterSizeSliderChanged(_:))
          neoMessageSpeedFactorField.formatter = Self.numberFormatter
-         cmdTypingSpeedFactorField.formatter = Self.numberFormatter
-         cmdTypingSpeedFactorField.delegate = self
+         cmdOutputHoldSecondsField.formatter = Self.numberFormatter
+         cmdOutputHoldSecondsField.delegate = self
          rainDensityField.formatter = Self.numberFormatter
          rainDurationField.formatter = Self.integerFormatter
          frameRateField.formatter = Self.numberFormatter
@@ -665,10 +679,10 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
 
     /// Refreshes editable controls without changing the scene's retained values or enable toggle.
     private func updateSceneControls() {
-        cmdTypingSpeedFactorField.isEnabled = cmdSceneCheckbox.state == .on
+        cmdOutputHoldSecondsField.isEnabled = cmdSceneCheckbox.state == .on
         nameField.isEnabled = neoMessageSceneCheckbox.state == .on
         linesEditButton.isEnabled = neoMessageSceneCheckbox.state == .on
-        for control in [commandsEditButton, commandsSequenceRadio, commandsRandomRadio] {
+        for control in [commandsEditButton, commandsSequenceRadio, commandsRandomRadio, commandsShuffleRadio] {
             control.isEnabled = cmdSceneCheckbox.state == .on
         }
     }
@@ -688,19 +702,21 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         label.widthAnchor.constraint(equalToConstant: 100).isActive = true
         let heading = NSStackView(views: [label, commandsEditButton])
         heading.spacing = 12
-        for radio in [commandsSequenceRadio, commandsRandomRadio] {
+        for radio in [commandsSequenceRadio, commandsRandomRadio, commandsShuffleRadio] {
             radio.target = self
             radio.action = #selector(commandModeChanged(_:))
         }
-        let modes = NSStackView(views: [commandsSequenceRadio, commandsRandomRadio])
-        modes.spacing = 12
+        let modes = NSStackView(views: [commandsSequenceRadio, commandsRandomRadio, commandsShuffleRadio])
+        modes.orientation = .vertical
+        modes.alignment = .leading
+        modes.spacing = 4
         let stack = NSStackView(views: [
             makeCheckboxSection(checkbox: cmdSceneCheckbox, description: MatrixScreenSaverOptions.cmdSceneDescription),
             heading, modes,
-            makeNumericSection(title: "Typing speed", field: cmdTypingSpeedFactorField,
-                               description: MatrixScreenSaverOptions.cmdTypingSpeedFactorDescription),
+            makeNumericSection(title: "Output hold", field: cmdOutputHoldSecondsField,
+                               description: MatrixScreenSaverOptions.cmdOutputHoldSecondsDescription),
         ])
-        cmdTypingSpeedFactorField.setAccessibilityLabel("Custom typing speed")
+        cmdOutputHoldSecondsField.setAccessibilityLabel("Command output hold in seconds")
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 4
@@ -711,6 +727,7 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
     @objc private func commandModeChanged(_ sender: NSButton) {
         commandsSequenceRadio.state = sender === commandsSequenceRadio ? .on : .off
         commandsRandomRadio.state = sender === commandsRandomRadio ? .on : .off
+        commandsShuffleRadio.state = sender === commandsShuffleRadio ? .on : .off
     }
 
     /// Opens a separate editor without changing the commands accepted by the main dialog.
@@ -1347,9 +1364,9 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
         let sizeIndex = Int(characterSizeSlider.doubleValue.rounded())
         let sizePair = MatrixScreenSaverOptions.characterSizePairs[sizeIndex]
          let neoMessageSpeedFactor = try parseDouble(from: neoMessageSpeedFactorField, error: .neoMessageSpeedFactor)
-         let cmdTypingSpeedFactor = try parseDouble(from: cmdTypingSpeedFactorField, error: .cmdTypingSpeedFactor)
-         guard cmdTypingSpeedFactor.isFinite, cmdTypingSpeedFactor > 0 else {
-             throw ValidationError.cmdTypingSpeedFactor
+         let cmdOutputHoldSeconds = try parseDouble(from: cmdOutputHoldSecondsField, error: .cmdOutputHoldSeconds)
+         guard cmdOutputHoldSeconds.isFinite, cmdOutputHoldSeconds >= 0 else {
+             throw ValidationError.cmdOutputHoldSeconds
          }
          let rainDensity = try parseDouble(from: rainDensityField, error: .rainDensity)
          let rainDurationSeconds = try parseInteger(from: rainDurationField, error: .rainDurationSeconds)
@@ -1378,9 +1395,10 @@ final class MatrixScreenSaverOptionsSheetController: NSObject,
             name: nameField.stringValue,
             neoMessageLines: pendingLines,
             cmdSceneEnabled: cmdSceneCheckbox.state == .on,
-            cmdTypingSpeedFactor: cmdTypingSpeedFactor,
+            cmdOutputHoldSeconds: cmdOutputHoldSeconds,
              commands: pendingCommands,
-             commandsRunInSequence: commandsSequenceRadio.state == .on,
+             commandsRunInSequence: commandsSequenceRadio.state == .on || commandsShuffleRadio.state == .on,
+             commandsShuffleSequence: commandsShuffleRadio.state == .on,
             numberSceneEnabled: numberSceneCheckbox.state == .on,
             twinkleEnabled: twinkleCheckbox.state == .on,
             diffuseEnabled: diffuseCheckbox.state == .on,

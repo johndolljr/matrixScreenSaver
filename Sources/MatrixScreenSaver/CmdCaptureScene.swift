@@ -3,19 +3,19 @@ import Darwin
 
 /// The drawing state snapshot the view uses to render the current cmd capture frame.
 struct CmdCaptureRenderState {
-    /// Visible output rows, including the partially typed bottom row.
+    /// Visible command and output rows, clipped to the scrolling viewport.
     let lines: [String]
-    /// Launching indicator, absent as soon as output arrives.
-    let statusLine: String?
     /// Uses the same blink cadence as Neo messages, including while waiting for output.
     let cursorVisible: Bool
 }
 
-/// Types live command output into a bounded viewport, scrolling rather than clearing between rows.
+/// Types a command with trace timing, then presents live output without a typing delay.
 struct CmdCaptureScene {
     /// Stages of capture presentation.
     enum Phase: Equatable {
-        /// Waiting for a background capture result.
+        /// Blinking, typing the command, and pausing before execution.
+        case typingCommand
+        /// Ready to execute, or waiting for the running command's first output.
         case launching
         /// Appending rows and holding the completed output.
         case presenting
@@ -25,22 +25,27 @@ struct CmdCaptureScene {
 
     /// Default deadline for bounded standalone captures; live scene commands run until exit or cancellation.
     static let captureTimeout: TimeInterval = 12.0
-    /// Indicator shown while the background task runs.
-    static let statusLineText = "Querying..."
-
     /// Current presentation stage.
     private(set) var phase: Phase = .done
     /// All captured rows, clipped horizontally but retained for scrolling.
     private(set) var lines: [String] = []
+    /// Original shell text; display clipping never changes what executes.
+    private(set) var command = ""
 
     private var startTime: TimeInterval = 0
     private var lastAdvanceTime: TimeInterval = 0
-    private var typedCharacters: Double = 0
-    private var captureFinished = false
     private var holdStart: TimeInterval?
     private var viewportRows = 1
-    private var characterCount = 0
-    private var speedFactor: Double = 1
+    private var viewportColumns = 1
+    private var charTimings: [TimeInterval] = []
+    private var typingEnd: TimeInterval = 0
+    private var launchTime: TimeInterval = 0
+    private var holdDuration: TimeInterval = 10
+    private var visibleCommandCount = 0
+
+    private var displayCommand: String {
+        command.components(separatedBy: .newlines).joined(separator: " ")
+    }
 
     /// Projected active duration, available only after the command finishes.
     private(set) var scheduledDuration: TimeInterval?
@@ -51,20 +56,33 @@ struct CmdCaptureScene {
     /// - Parameters:
     ///   - startTime: Reference-relative time the scene begins.
     ///   - command: Command to capture. Empty skips straight to `.done`.
-    ///   - speedFactor: Custom typing multiplier; 1 types 25 characters per second.
-    mutating func reset(startTime: TimeInterval, command: String, speedFactor: Double = 1) {
+    ///   - speedFactor: General intro typing multiplier, using trace's natural rhythm.
+    ///   - seed: Shared content seed for identical command timing across displays.
+    ///   - holdDuration: Seconds to retain output after exit; zero advances immediately.
+    ///   - size: Available character viewport, excluding renderer margins.
+    mutating func reset(startTime: TimeInterval, command: String, speedFactor: Double = 1,
+                        seed: UInt64 = 1, holdDuration: TimeInterval = 10,
+                        size: TerminalSize = TerminalSize(columns: 80, rows: 24)) {
         self.startTime = startTime
-        self.speedFactor = speedFactor.isFinite && speedFactor > 0 ? speedFactor : 1
-        typedCharacters = 0
+        self.command = command
+        self.holdDuration = holdDuration.isFinite && holdDuration >= 0 ? holdDuration : 10
+        viewportRows = max(size.rows, 1)
+        viewportColumns = max(size.columns, 1)
+        var rng = Xorshift64(seed: seed)
+        let speed = speedFactor.isFinite && speedFactor > 0 ? speedFactor : 1
+        charTimings = NativeMatrixRenderer.naturalTypingTimings(for: displayCommand,
+                                                               baseInterval: 1.0 / 40 / speed, rng: &rng)
+        typingEnd = 2 + (charTimings.last ?? 0)
+        launchTime = typingEnd + Double.random(in: 1...3, using: &rng)
+        visibleCommandCount = 0
         lastAdvanceTime = startTime
-        captureFinished = false
         holdStart = nil
         lines = []
         scheduledDuration = nil
-        phase = command.isEmpty ? .done : .launching
+        phase = command.isEmpty ? .done : .typingCommand
     }
 
-    /// Applies the latest bounded output snapshot without restarting its typing progress.
+    /// Publishes output immediately in the viewport cleared after command typing.
     ///
     /// - Parameters:
     ///   - output: Captured command output.
@@ -74,23 +92,20 @@ struct CmdCaptureScene {
     ///   - isComplete: Whether the shell has exited; only then can the final hold begin.
     mutating func receiveCapture(_ output: String, maxLines: Int, maxColumns: Int, now: TimeInterval,
                                  isComplete: Bool = true) {
-        guard phase != .done, !captureFinished else { return }
-        if phase == .presenting { advance(now: now) }
+        guard phase == .launching || phase == .presenting, holdStart == nil else { return }
         guard !output.isEmpty || isComplete else { return }
         viewportRows = max(maxLines, 1)
+        viewportColumns = max(maxColumns, 1)
         var rows = output.replacingOccurrences(of: "\r\n", with: "\n")
             .components(separatedBy: "\n")
         if rows.last == "" { rows.removeLast() }
         lines = (rows.isEmpty ? ["(no output)"] : rows).map {
             String(String.UnicodeScalarView($0.unicodeScalars.prefix(max(maxColumns, 1))))
         }
-        characterCount = lines.reduce(0) { $0 + $1.unicodeScalars.count } + max(lines.count - 1, 0)
-        typedCharacters = min(typedCharacters, Double(characterCount))
         lastAdvanceTime = now
-        captureFinished = isComplete
         if isComplete {
-            scheduledDuration = max(now - startTime, 0) + (Double(characterCount) - typedCharacters) * 0.04 / speedFactor + 2.5
-            if typedCharacters >= Double(characterCount) { holdStart = now }
+            scheduledDuration = max(now - startTime, 0) + holdDuration
+            holdStart = now
         }
         phase = .presenting
     }
@@ -104,46 +119,38 @@ struct CmdCaptureScene {
         if let holdStart { self.holdStart = holdStart + duration }
     }
 
-    /// Advances the current message using the scene's reference-relative clock.
+    /// Advances command typing or the post-exit hold using active elapsed time.
     ///
     /// - Parameter now: Current reference-relative time in seconds.
     mutating func advance(now: TimeInterval) {
         guard phase != .done else { return }
-        if phase == .launching {
-            lastAdvanceTime = now
-            return
+        if phase == .typingCommand {
+            let elapsed = now - startTime
+            visibleCommandCount = charTimings.prefix(while: { $0 <= elapsed - 2 }).count
+            if elapsed >= launchTime { phase = .launching }
         }
-        let needed = max(Double(characterCount) - typedCharacters, 0)
-        let progress = max(0, now - lastAdvanceTime) * 25 * speedFactor
-        typedCharacters = min(Double(characterCount), typedCharacters + progress)
-        if captureFinished, typedCharacters >= Double(characterCount) {
-            if holdStart == nil { holdStart = lastAdvanceTime + needed * 0.04 / speedFactor }
-            if now >= holdStart! + 2.5 { phase = .done }
-        }
+        if let holdStart, now >= holdStart + holdDuration { phase = .done }
         lastAdvanceTime = now
     }
 
     /// Snapshot for the native renderer at the current presentation stage.
     var renderState: CmdCaptureRenderState {
-        let cursorVisible = Int(max(0, lastAdvanceTime - startTime) / NeoMessageScene.cursorBlinkInterval) % 2 == 0
+        let elapsed = max(0, lastAdvanceTime - startTime)
+        let cursorElapsed = phase == .typingCommand
+            ? (elapsed < 2 ? elapsed : elapsed < typingEnd ? elapsed - 2 : elapsed - typingEnd)
+            : elapsed
+        let cursorVisible = Int(cursorElapsed / NeoMessageScene.cursorBlinkInterval) % 2 == 0
+        let commandLine = String(String.UnicodeScalarView(
+            displayCommand.prefix(visibleCommandCount).unicodeScalars.prefix(viewportColumns)))
         switch phase {
         case .done:
-            return CmdCaptureRenderState(lines: [], statusLine: nil, cursorVisible: false)
+            return CmdCaptureRenderState(lines: [], cursorVisible: false)
+        case .typingCommand:
+            return CmdCaptureRenderState(lines: [commandLine], cursorVisible: cursorVisible)
         case .launching:
-            return CmdCaptureRenderState(lines: [], statusLine: Self.statusLineText, cursorVisible: cursorVisible)
+            return CmdCaptureRenderState(lines: [""], cursorVisible: cursorVisible)
         case .presenting:
-            var remaining = floor(typedCharacters)
-            var currentRow = 0
-            while currentRow < lines.count - 1 {
-                let count = lines[currentRow].unicodeScalars.count
-                if remaining < Double(count + 1) { break }
-                remaining -= Double(count + 1)
-                currentRow += 1
-            }
-            var visible = Array(lines[max(0, currentRow - viewportRows + 1)..<currentRow])
-            let line = lines[currentRow]
-            visible.append(String(String.UnicodeScalarView(line.unicodeScalars.prefix(Int(min(remaining, Double(line.unicodeScalars.count)))))))
-            return CmdCaptureRenderState(lines: visible, statusLine: nil, cursorVisible: cursorVisible)
+            return CmdCaptureRenderState(lines: Array(lines.suffix(viewportRows)), cursorVisible: cursorVisible)
         }
     }
 }

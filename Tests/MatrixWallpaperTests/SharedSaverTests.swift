@@ -72,13 +72,16 @@ func sharedSaverTests() {
     defer { defaults.removePersistentDomain(forName: domain); defaults.synchronize() }
     MatrixScreenSaverOptions.registerDefaults(in: defaults)
     var options = MatrixScreenSaverOptions.load(from: defaults)
-    check(options.cmdTypingSpeedFactor == 10 && MatrixScreenSaverOptions().cmdTypingSpeedFactor == 10
-          && NativeMatrixRenderer.Configuration().cmdTypingSpeedFactor == 10,
-          "custom typing speed defaults to ten in persistence, options and the renderer")
-    options.cmdTypingSpeedFactor = 1
+    check(!options.commandsShuffleSequence, "existing command playback defaults to unshuffled order")
+    defaults.set(40, forKey: "CmdTypingSpeedFactor")
+    check(options.cmdOutputHoldSeconds == 10 && MatrixScreenSaverOptions().cmdOutputHoldSeconds == 10
+          && NativeMatrixRenderer.Configuration().cmdOutputHoldSeconds == 10
+          && MatrixScreenSaverOptions.load(from: defaults).cmdOutputHoldSeconds == 10,
+          "output hold defaults to ten without interpreting the retired custom speed as a duration")
+    options.cmdOutputHoldSeconds = 0
     options.save(to: defaults)
-    check(MatrixScreenSaverOptions.load(from: defaults).cmdTypingSpeedFactor == 1,
-          "the new custom speed default preserves an explicitly saved value")
+    check(MatrixScreenSaverOptions.load(from: defaults).cmdOutputHoldSeconds == 0,
+          "output hold preserves an explicitly saved zero")
     options.frameRate = 42
     options.neoMessageLines = ["Shared options"]
     options.name = "Trinity"
@@ -87,14 +90,25 @@ func sharedSaverTests() {
     options.numberSceneEnabled = false
     options.commands = ["printf first", "printf second"]
     options.commandsRunInSequence = true
+    options.commandsShuffleSequence = true
     options.neoMessageSpeedFactor = 2
-    options.cmdTypingSpeedFactor = 40
+    options.cmdOutputHoldSeconds = 4.5
     var applied = false
     let controller = MatrixScreenSaverOptionsSheetController { edited in
         edited.save(to: defaults)
         applied = true
     }
     controller.prepare(using: options)
+    let shuffleRadio: NSButton? = stored("commandsShuffleRadio", in: controller)
+    check(shuffleRadio?.state == .on, "options restores the shuffled command playback choice")
+    let randomRadio: NSButton? = stored("commandsRandomRadio", in: controller)
+    let sequenceRadio: NSButton? = stored("commandsSequenceRadio", in: controller)
+    randomRadio?.performClick(nil)
+    check(randomRadio?.state == .on && shuffleRadio?.state == .off && sequenceRadio?.state == .off,
+          "one random command clears both whole-list playback choices")
+    shuffleRadio?.performClick(nil)
+    check(shuffleRadio?.state == .on && randomRadio?.state == .off && sequenceRadio?.state == .off,
+          "shuffled playback is mutually exclusive with the existing modes")
     checkOptionsLayout(in: controller.configureSheet())
     checkSceneOptions(controller, options: options)
     let applyButton = buttons(in: controller.configureSheet().contentView!).first { $0.title == "OK" }
@@ -105,8 +119,10 @@ func sharedSaverTests() {
           "native Apply validates and delivers options through the reusable callback")
     check(loaded.name == "Trinity" && loaded.cmdSceneEnabled && loaded.commands == options.commands
            && !loaded.neoMessageSceneEnabled && loaded.commandsRunInSequence && loaded.neoMessageSpeedFactor == 2
-           && loaded.cmdTypingSpeedFactor == 40 && loaded.rendererConfiguration().cmdTypingSpeedFactor == 40,
-          "tabbed options preserve the Neo name and command settings through Apply and persistence")
+           && loaded.cmdOutputHoldSeconds == 4.5 && loaded.rendererConfiguration().cmdOutputHoldSeconds == 4.5,
+           "tabbed options preserve the Neo name and command settings through Apply and persistence")
+    check(loaded.commandsShuffleSequence && loaded.rendererConfiguration().commandsShuffleSequence,
+          "shuffled playback survives Apply, persistence and renderer configuration")
     var cancelApplied = false
     let cancelController = MatrixScreenSaverOptionsSheetController { _ in cancelApplied = true }
     cancelController.prepare(using: options)
@@ -123,15 +139,18 @@ func sharedSaverTests() {
     commandOptions.commands = [String(repeating: "x", count: 513), "printf safe", "printf bad\0ignored"]
     check(commandOptions.sanitized().commands == ["printf safe"],
            "command sanitization rejects invalid text instead of executing a clipped command")
-    for value in [Double.nan, .infinity, 0, -1] {
-        commandOptions.cmdTypingSpeedFactor = value
-        check(commandOptions.sanitized().cmdTypingSpeedFactor == 10,
-              "custom speed rejects nonfinite and nonpositive persisted values")
+    for value in [Double.nan, .infinity, -1] {
+        commandOptions.cmdOutputHoldSeconds = value
+        var configuration = NativeMatrixRenderer.Configuration()
+        configuration.cmdOutputHoldSeconds = value
+        check(commandOptions.sanitized().cmdOutputHoldSeconds == 10
+              && configuration.sanitized().cmdOutputHoldSeconds == 10,
+              "output hold rejects nonfinite and negative durations in persistence and renderer configuration")
     }
     commandOptions = original
-    commandOptions.cmdTypingSpeedFactor = 100
+    commandOptions.cmdOutputHoldSeconds = 100
     check(commandOptions.requiresSceneRestart(comparedTo: original),
-          "custom typing speed changes restart all participating displays")
+          "output hold changes restart all participating displays")
     var live = original
     live.twinkleEnabled.toggle()
     live.diffuseEnabled.toggle()
@@ -151,6 +170,7 @@ func sharedSaverTests() {
         ("Neo name", { $0.name = "Trinity" }),
         ("command enablement", { $0.cmdSceneEnabled.toggle() }),
         ("command list", { $0.commands = ["printf hello"] }),
+        ("command shuffle", { $0.commandsShuffleSequence = true }),
         ("number intro", { $0.numberSceneEnabled.toggle() }),
         ("rain cycle mode", { $0.rainRunForever.toggle() }),
         ("rain cycle duration", { $0.rainDurationSeconds += 1 }),
@@ -253,6 +273,7 @@ private func glyphCacheTests() {
     capturedOptions.cmdSceneEnabled = true
     capturedOptions.numberSceneEnabled = false
     capturedOptions.commands = ["printf '\\303\\251'"]
+    capturedOptions.neoMessageSpeedFactor = 100
     capturedOptions.scanLinesIntensity = 0
     let container = NSView(frame: view.frame)
     container.addSubview(view)
@@ -260,7 +281,7 @@ private func glyphCacheTests() {
     view.startAnimation()
     view.applyWallpaperOptions(capturedOptions)
     let renderer: NativeMatrixRenderer? = stored("nativeRenderer", in: view)
-    let captured = eventually {
+    let captured = eventually(8) {
         view.animateOneFrame()
         return renderer?[NativeMatrixRenderer.contentMargin, NativeMatrixRenderer.contentMargin].scalar == "é"
     }
@@ -336,8 +357,9 @@ private func checkSceneOptions(_ controller: MatrixScreenSaverOptionsSheetContro
     }
     let customCopy = "Execute custom commands and show its output as messages. Off by default."
     let labels = descendants(of: groups[1]).compactMap { $0 as? NSTextField }
-    check(labels.contains { $0.isEditable && $0.accessibilityLabel() == "Custom typing speed" && $0.stringValue == "40" },
-          "custom fieldset owns an independent typing speed control")
+    check(labels.contains { $0.isEditable && $0.accessibilityLabel() == "Command output hold in seconds" && $0.stringValue == "4.5" }
+          && !labels.contains { $0.stringValue == "Typing speed" || $0.accessibilityLabel() == "Custom typing speed" },
+          "custom fieldset replaces independent typing speed with an output hold control")
     check(labels.filter { $0.stringValue == customCopy }.count == 1
           && labels.contains { $0.stringValue == "Commands" }, "custom group has exact description and separate Commands row")
     check(descendants(of: groups[0]).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "Lines" },
